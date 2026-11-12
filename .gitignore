@@ -1,0 +1,22 @@
+# Local account information and runtime data
+config.json
+config.local.json
+output/
+.env
+.env.*
+!.env.example
+*.log
+*.db
+*.sqlite*
+*.pem
+*.key
+*.p12
+# Local dependencies and build products
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+node_modules/
+.DS_Store
+*.zip

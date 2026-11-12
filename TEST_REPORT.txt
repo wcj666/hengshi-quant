@@ -1,0 +1,25 @@
+衡势 A股量化助手 V3.6.1｜本地离线测试报告
+
+测试范围：Python算法与模拟行情、报价源时间验证、限时等待和同源重复请求保护、原有持仓盈亏与风控、缠论和MACD、安装器版本和配置备份、JavaScript语法、Bash语法。
+
+测试命令：在源码目录下执行
+python3 test_v361.py
+python3 test_v360.py
+python3 test_chan_daily.py
+python3 test_chan_history.py
+python3 test_chan_plain.py
+python3 test_intraday.py
+python3 test_market_context.py
+python3 test_pnl.py
+python3 test_poll_cadence.py
+python3 test_portfolio_quotes.py
+python3 test_technical_engine.py
+python3 test_trade_signals.py
+node --check static/dashboard.js
+bash -n *.command
+
+结果：12组Python离线测试全部通过；Python compileall、JavaScript与Bash语法检查通过；配置备份读写检查通过；压缩包结构与CRC另行验证。
+
+未验证：由于当前环境没有 Flask、waitress、AKShare，也无法访问用户Mac本地服务，尚未进行Mac LaunchAgent启动、实际Web请求或公开行情源实时网络连通性测试。30秒/10秒是采集目标，不是报价源实时保证。
+
+数据规则：源时间戳未核验时，持仓价格、账户净值、盈亏与预算只可作为参考估算；禁止自动新交易提示和新增买入股数展示。交易依照券商实时行情及真实账户。

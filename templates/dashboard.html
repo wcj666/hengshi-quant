@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf }}">
+  <title>衡势 · A股量化研究台</title>
+  <link rel="icon" type="image/svg+xml" href="/static/hengshi-logo.svg">
+  <link rel="stylesheet" href="/static/dashboard.css?v=3.6.1-strategy-v1">
+  <script defer src="/static/dashboard.js?v=3.6.1-strategy-v1"></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand"><div class="brand-icon"><img src="/static/hengshi-logo.svg" alt="衡势量化" width="54" height="54"></div><div><strong>衡势量化</strong><span>LOCAL RESEARCH / V3.6.1</span></div></div>
+    <div class="sidebar-label">工作空间</div>
+    <nav aria-label="主导航">
+      <a href="#overview" class="nav-link active">◈ <span>账户总览</span></a>
+      <a href="#risk" class="nav-link">◉ <span>我的持仓</span></a>
+      <a href="#watch" class="nav-link">◎ <span>自选与分析</span></a>
+      <a href="#daily-observe" class="nav-link">★ <span>每日观察</span><b class="nav-counter" id="nav-count-daily">0</b></a>
+      <a href="#scanner" class="nav-link">▥ <span>全市场筛选</span></a>
+      <details class="nav-group"><summary>交易观察</summary>
+        <a href="#signals-reduce" class="nav-link">↘ <span>减仓复核</span><b class="nav-counter" id="nav-count-reduce">0</b></a>
+        <a href="#signals-add" class="nav-link">↗ <span>新增观察</span><b class="nav-counter" id="nav-count-add">0</b></a>
+        <a href="#signals-switch" class="nav-link">⇄ <span>换仓比较</span><b class="nav-counter" id="nav-count-switch">0</b></a>
+        <a href="#signals-t" class="nav-link">↔ <span>做T观察</span><b class="nav-counter" id="nav-count-t">0</b></a>
+      </details>
+      <details class="nav-group"><summary>更多工具</summary>
+        <a href="#intraday" class="nav-link">◷ <span>行情诊断</span></a>
+        <a href="#sectors" class="nav-link">▤ <span>行业板块</span></a>
+        <a href="#premarket" class="nav-link">◷ <span>竞价与海外</span></a>
+      </details>
+      <a href="#settings" class="nav-link">⚙ <span>参数设置</span></a>
+    </nav>
+    <div class="side-footer"><div class="secure-dot"></div>仅本地运行<br><small>127.0.0.1 · 不连接券商 · 不自动交易</small></div>
+  </aside>
+  <main class="main">
+    <header class="topbar"><div><h1>A股量化研究台 <span class="version">v3.6.1</span></h1><p>看持仓 · 查风险 · 做研究</p></div><div class="top-actions"><span id="clock" class="clock">—</span><button id="refresh" class="btn ghost">↻ 更新显示</button></div></header>
+    <div id="toast" role="status" aria-live="polite" class="toast hidden"></div>
+    <section id="overview">
+      <div class="section-heading"><div><span class="eyebrow">01 / ACCOUNT OVERVIEW</span><h2>账户概览</h2></div><span id="data-badge" class="pill muted">数据状态待检查</span></div>
+      <div id="data-note" class="data-note">尚未加载行情</div>
+      <div class="stats market-stats" aria-label="账户资产快照">
+        <div class="stat hero-stat">
+          <div class="hero-upper">
+            <div class="hero-balance">
+              <div class="hero-title-row">
+                <span class="hero-title">总资产 <small>快照估算净值</small></span>
+                <em id="data-badge-inline" class="inline-tag">本地估算</em>
+              </div>
+              <strong id="equity" class="balance-amount">—</strong>
+              <div id="equity-sub" class="hero-sub">需要最新完整持仓快照</div>
+            </div>
+            <div class="hero-metrics">
+              <div class="mini-kpi">
+                <span id="floating-label">浮动盈亏 <small>按持仓成本估算</small></span>
+                <strong id="floating-pnl">—</strong>
+                <div id="floating-sub">需要完整持仓行情</div>
+              </div>
+              <div class="mini-kpi">
+                <span>当日参考盈亏 <small>按上一交易日收盘价估算</small></span>
+                <strong id="daily-pnl">—</strong>
+                <div id="daily-sub">需要全部持仓昨收价</div>
+              </div>
+            </div>
+          </div>
+          <div class="hero-footer">
+            <span><span class="small-dot"></span>本地手动持仓台账 · 非券商账户实时同步</span>
+            <span><b class="market-up">红色</b>表示盈利 / 上涨，<b class="market-down">绿色</b>表示亏损 / 下跌</span>
+          </div>
+        </div>
+        <div class="stat sub-stat baseline-stat"><span>基准总资产 <small>2026-11-06</small></span><strong id="baseline">—</strong><div>原账户历史参考 · V1另行记录高水位</div></div>
+        <div class="stat sub-stat cash-stat"><span>可用现金 <small>手动维护台账</small></span><strong id="cash">—</strong><div>交易后请更新持仓和现金</div></div>
+        <div class="stat sub-stat accent remaining-stat"><span>剩余回撤预算</span><strong id="remaining">—</strong><div id="remaining-sub">上限 ¥1,000</div></div>
+      </div>
+      <div class="overview-shortcuts"><a class="btn primary" href="#risk">查看持仓</a><a class="btn ghost" href="#watch">自选分析</a><a class="btn ghost" href="#daily-observe">每日观察</a><span>行情自动更新 · 手动维护持仓与现金</span></div>
+      <div class="risk-tier-banner" id="risk-tier-banner" role="status" aria-live="polite">V1账户回撤：500元暂停新增 / 800元减仓复核 / 1,000元暂停策略新增。</div>
+
+      <div class="panel strategy-panel" id="strategy-panel">
+        <div class="panel-head"><div><h3>交易体系 V1 · 1～2周波段</h3><p>上升趋势缩量回调后转强 · 固定计划 · 每天最多新开1只 · 不加仓、不摊平</p></div><span id="strategy-status" class="pill muted">加载规则中</span></div>
+        <div class="strategy-rules" id="strategy-rules"></div>
+        <div id="strategy-account" class="signal-note">V1账户等待初始化及台账核对；原11月6日历史基准单独保留。</div>
+        <div id="strategy-resume-controls" class="signal-note blocked" hidden><p>先记录触发后的完整复盘；恢复不重置回撤，高于暂停阈值仍不能新增。</p><button id="strategy-resume" class="btn ghost" type="button">已完成复盘，申请恢复新增核验</button></div>
+        <div id="strategy-blockers" class="signal-note blocked">正在核对新增条件。</div>
+        <div id="strategy-exposure" class="strategy-metrics"></div>
+        <details class="disclosure"><summary>旧仓过渡与行业敞口</summary><div id="strategy-legacy" class="table-wrap"></div><div id="strategy-sectors" class="table-wrap"></div><p class="tip">未知行业或未设固定止损会暂停新增；仍显示已有行情与盈亏。旧仓退出条件须人工核验，不能倒推买入日期。</p></details>
+        <details class="disclosure"><summary>外部资金流水与对账</summary><div class="strategy-form-body"><p class="tip">转入为正、转出为负；买卖成交不属于外部资金。起点前已包含的入金不重复录入。保存后核对台账；对账不会重置回撤高点。</p>
+          <form id="strategy-flow-form" class="inline-form"><label>转账日期<input name="date" type="date" required></label><label>净转入/转出（元）<input name="amount" type="number" step="0.01" required placeholder="转出填负数"></label><label>备注<input name="note" maxlength="200"></label><button class="btn primary" type="submit">登记资金流水</button></form>
+          <button id="strategy-reconcile" type="button" class="btn ghost">核对当前台账与资金流水</button><div id="strategy-flows" class="table-wrap"></div></div></details>
+        <details class="disclosure"><summary>已结束交易复盘</summary><div class="strategy-form-body"><form id="strategy-review-form" class="trade-entry-form"><label>代码<input name="code" required pattern="[0-9]{6}" maxlength="6"></label><label>真实开仓日期<input name="opened_on" type="date" required></label><label>真实平仓日期<input name="closed_on" type="date" required></label><label>含实际费用净盈亏<input name="net_pnl" type="number" step="0.01" required></label><label>初始总计划风险<input name="planned_risk" type="number" min="0.01" step="0.01" required></label><label>规则执行<select name="violation"><option value="false">遵守规则</option><option value="true">存在主动违规</option></select></label><label class="trade-entry-note">偏差与下一步改进<input name="note" maxlength="300" required></label><button class="btn primary" type="submit">保存真实复盘</button></form><p class="tip">连续3笔亏损或一次主动违规后暂停新增2个交易日；已有仓位仍按退出计划处理。未知成交不要补造。</p><div id="strategy-reviews" class="table-wrap"></div></div></details>
+      </div>
+      <div class="overview-risk">
+        <div class="panel"><div class="panel-head"><div><h3>风险预算使用情况</h3><p>V1按固定止损、剩余数量与费用预留核算；未定义风险时暂停新增</p></div><span id="risk-tag" class="pill muted">待核验</span></div><div class="risk-meter"><div id="risk-fill" style="width:0%"></div></div><div class="risk-row"><span>V1调流后高水位回撤</span><strong id="risk-used">—</strong></div><div class="risk-row"><span>现有仓位计划压力损失</span><strong id="risk-stress">—</strong></div><div class="risk-row emphasis"><span>可分配给新交易的风险额度</span><strong id="new-risk">—</strong></div><p class="tip">模型不包含跳空、流动性不足与成交滑点，因此不能确保严格守住亏损上限。</p></div>
+
+      </div>
+      <details class="disclosure"><summary>净值历史记录</summary>      <div class="panel" id="curve-panel"><div class="panel-head"><div><h3>净值估算记录（从本版启用后开始）</h3><p>每个交易日最后一次有效公开快照，非券商正式收盘净值；持仓或现金变更可能造成曲线跳变。</p></div><button class="btn ghost" id="curve-refresh">↻ 更新曲线</button></div><div id="equity-curve-chart" class="equity-curve-chart">尚无有效快照记录。</div><p id="curve-source" class="tip">不填造历史收益。</p></div></details>
+    </section>
+    <section id="risk"><div class="section-heading"><div><span class="eyebrow">02 / PORTFOLIO CONTROL</span><h2>我的持仓</h2><p>按现金、单股仓位、个股止损距离及全账户预算估算新增股数，所有关键价位均单独标记。</p></div></div>
+      <div class="panel"><div class="panel-head"><h3>现有持仓 <small>仅修改本地台账，不会向券商下单</small></h3><button id="chan-check-holdings" class="btn ghost">分析全部持仓（1～2周）</button></div><div id="chan-holdings-results" class="chan-holdings-results"></div><div id="positions-table" class="table-wrap"></div><details class="disclosure" id="position-editor"><summary>新增 / 编辑持仓</summary><h3 id="position-form-title">增加/更新持仓记录</h3><form id="position-form" class="position-form"><label>证券代码<input name="code" inputmode="numeric" maxlength="6" required placeholder="300274"></label><label>名称<input name="name" required maxlength="36" placeholder="阳光电源"></label><label>类型<select name="type"><option value="stock">股票</option><option value="etf">ETF</option><option value="convertible">可转债</option></select></label><label>行业（ETF按标的归组）<input name="sector" maxlength="40" placeholder="如：电力设备；未知可暂留空"></label><label>数量<input type="number" name="quantity" min="0" step="1" required></label><label>持仓成本<input type="number" name="cost" min="0.001" step="0.001" required></label><label>基准参考价<input type="number" name="baseline_price" min="0.001" step="0.001" required></label><div class="form-actions"><button class="btn primary" type="submit" id="position-save">保存台账</button><button type="button" class="btn ghost" id="position-clear">清空表单</button></div></form><p class="tip">成交之后，需要同步修改数量、现金和新持仓记录；不能仅删除持仓但不增加卖出所得现金。基准参考价只供显示，不用于假装交易成交。</p></details></div>
+      <div class="panel"><div class="panel-head"><h3>V1新开仓额度核验</h3><span class="pill">买入以100股整数倍计算</span></div><div id="sizing-table" class="table-wrap"></div><p class="tip">只对后端通过V1的固定计划计算；额度包含至少20元费用滑点预留。少于100股取消，不通过挪近止损凑手数。实际成交可能超出计划风险。</p></div>
+      <details class="disclosure"><summary>减仓模拟</summary>      <div class="panel" id="reduction-panel"><div class="panel-head"><div><h3>智能减仓模拟（不下单）</h3><p>按本轮完整盘中价格，计算模拟卖出后计划止损压力变化；不会修改台账。</p></div><span class="pill muted">仅行情有效时可用</span></div>
+        <form id="reduction-form" class="inline-form"><label>选择现有持仓<select name="code" id="reduction-code" required><option value="">请选择持仓</option></select></label><label>假设卖出数量<input name="quantity" type="number" min="1" step="1" placeholder="如100" required></label><button type="submit" class="btn primary">模拟减仓</button></form>
+        <div id="reduction-result" class="signal-note">本工具仅计算风险情景，不会向券商下单，也不会登记成交。</div>
+      </div></details>
+      <details class="disclosure"><summary>人工成交记录</summary>      <div class="panel" id="trade-ledger"><div class="panel-head"><div><h3>人工成交记录</h3><p>填写真正发生的成交；保存记录后，仍需自行更新上方持仓数量与现金。</p></div><button class="btn ghost" id="trades-refresh">↻ 查看历史</button></div>
+        <form id="manual-trade-form" class="trade-entry-form">
+          <label>成交日期<input type="date" name="date" required></label><label>证券代码<input name="code" maxlength="6" inputmode="numeric" placeholder="300274" required></label>
+          <label>方向<select name="side"><option value="buy">买入</option><option value="sell">卖出</option></select></label>
+          <label>数量<input type="number" name="quantity" min="1" step="1" required></label><label>成交价<input type="number" name="price" min="0.001" step="0.001" required></label>
+          <label>实际费用（元）<input type="number" name="fee" min="0" step="0.01" value="0" required></label>
+          <label class="trade-entry-note">备注<input name="note" maxlength="200" placeholder="可写成交原因、券商单号末位等（勿填敏感信息）"></label>
+          <button type="submit" class="btn primary">保存人工成交</button>
+        </form>
+        <p class="tip">成交记录仅存在Mac本地，不会与券商账户自动同步，也不会自动调整持仓成本、数量或现金。请避免重复登记。</p>
+        <div id="trades-table" class="table-wrap">暂无成交记录。</div>
+      </div></details>
+      <div class="panel"><h3>更新账户现金</h3><form id="account-form" class="inline-form"><label>券商可用现金（元）<input name="cash" type="number" min="0" step="0.01" required></label><button class="btn primary" type="submit">保存现金</button></form></div>
+    </section>
+    <section id="intraday"><div class="section-heading"><div><span class="eyebrow">03 / INTRADAY POLLING</span><h2>盘中行情与风控提醒</h2><p>仅在A股交易时段自动抓取公开快照；无交易所级行情时间戳校验，提示需与券商核对。</p></div><span class="pill muted" id="monitor-pill">未启动</span></div>
+      <div class="panel"><div class="panel-head"><div><h3>轮询进程状态</h3><p id="monitor-status">尚未发现后台监控进程</p></div><button id="monitor-refresh" class="btn ghost">↻ 刷新监控</button></div>
+      <div class="scan-details"><div><span>北京时间</span><strong id="monitor-market-time">—</strong></div><div><span>采集完成于</span><strong id="monitor-update">—</strong></div><div><span>本次报价类型</span><strong id="monitor-mode">—</strong></div><div><span>账户预算变化</span><strong id="monitor-risk">—</strong></div></div>
+      <p class="tip">网页每6秒读取本机监控结果；后台盘中目标每10秒向公开行情源尝试一次请求（限流/超时自动减速），不代表行情源每10秒更新。免费行情可能延迟、停滞或缺失。休市、日历校验失败、网络错误时暂停交易信号。本机通知可能被macOS过滤。</p>
+      <div id="quote-health-banner" class="signal-note">数据源质量：尚未检查。源时间戳与本机抓取时间分开展示。</div>
+      <div id="quote-health-table" class="table-wrap"></div>
+      <h3>持仓及自选股最新抓取价格</h3><div class="table-wrap" id="intraday-quotes">暂无数据</div>
+      <h3>本次新触发提醒</h3><div class="table-wrap" id="intraday-alerts">暂无新提醒</div>
+      <p id="monitor-errors" class="tip"></p></div>
+      <div class="panel"><h3>启动盘中监控</h3><div class="btn-row"><button type="button" id="test-trade-popup" class="btn ghost">测试底部弹窗（纯演示）</button></div><p>本地网页登录后台服务保持运行，另开一个终端启动监控进程。也可安装登录后自动监控，无需一直保持网页打开。</p>
+      <div class="command">python intraday_monitor.py --mode live --interval 10 --notify</div>
+      <p>登录自动启动：</p><div class="command">python install_intraday_mac.py --interval 10</div>
+      <p class="tip">macOS时区可以是日本时间，监控仍按北京时间识别A股交易时段。务必检查持仓与现金台账是否为最新。</p></div>
+    </section>
+    <section id="scanner"><div class="section-heading"><div><span class="eyebrow">04 / STOCK SCANNER</span><h2>强势股票筛选</h2><p>先批量快照筛选，再对候选做日线验证；评分只是研究排序。</p></div></div>        <div class="panel"><div class="panel-head"><div><h3>最近扫描</h3><p>扫描需要数分钟，完成后自动更新。</p></div></div><div class="scan-details"><div><span>报告模式</span><strong id="scan-mode">—</strong></div><div><span>生成时间</span><strong id="scan-time">—</strong></div><div><span>市场覆盖</span><strong id="scan-count">—</strong></div><div><span>日线复核</span><strong id="verify-count">—</strong></div></div><div class="btn-row"><button class="btn primary" id="live-scan">联网执行筛选</button><details class="demo-option"><summary>演示测试</summary><button class="btn ghost" id="demo-scan">运行演示（会替换报告）</button></details><a class="btn ghost" href="/report" target="_blank" rel="noopener">查看完整报告 ↗</a></div><p id="job-message" class="job-msg">本次网页会话未运行扫描</p></div>
+<div class="panel"><div class="table-tabs"><button class="table-tab selected" data-tab="verified">日线验证榜</button><button class="table-tab" data-tab="candidate">快照初筛榜</button><span class="table-help">最多显示前30名</span></div><div id="ranking-table" class="table-wrap"></div></div></section>
+    <section id="daily-observe" class="daily-section">
+      <div class="section-heading"><div><span class="eyebrow">05 / DAILY FIVE · REVIEW ONLY</span><h2>每日观察 · 最多5只</h2><p>盘后从全市场初筛与日线复核中选出最多5只，结合量价、趋势及简化缠论结构评分。不是确保上涨的买入推荐。</p></div><span id="daily-pill" class="pill muted">尚无扫描</span></div>
+      <div id="daily-warning" class="signal-note blocked">请先完成盘后联网扫描。历史名单不可直接用于今日买卖。</div>
+      <div class="daily-grid" id="daily-list"><div class="panel"><p class="tip">尚无每日候选。</p></div></div>
+      <div class="panel"><div class="panel-head"><div><h3>观察区管理</h3><p>每日自动替换研究名单，不覆盖你的人工自选股。可手动转入自选或排除不感兴趣的股票。</p></div><button class="btn ghost" id="daily-refresh">↻ 更新名单</button></div>
+      <form class="inline-form" id="daily-restore-form"><label>恢复被排除的股票代码<input name="code" inputmode="numeric" maxlength="6" placeholder="如 600406" required></label><button class="btn ghost" type="submit">取消排除</button></form>
+      <p id="daily-excludes" class="tip">排除清单：—</p><p class="tip">每日候选仅供研究，V1须另行完成固定形态核验、准备计划和人工复核。风险预算不够时不显示可新增股数；实际成交前必须重新核对券商报价和持仓。</p></div>
+    </section>
+    <section id="sectors"><div class="section-heading"><div><span class="eyebrow">06 / SECTOR MOMENTUM</span><h2>行业强度排行榜</h2><p>按当日涨跌幅与上涨家数占比计算；不代表资金净流入。</p></div></div><div class="panel"><div id="sector-table" class="table-wrap"></div></div></section>
+    <section id="watch"><div class="section-heading"><div><span class="eyebrow">07 / WATCHLIST</span><h2>我的证券观察池</h2><p>随时新增、删除；可在分析图上查看红色止损线、第一和第二止盈线，并自行锁定价位。</p></div></div>
+      <div class="panel"><h3>输入代码，直接分析</h3><form id="quick-analysis-form" class="inline-form"><label>证券代码（股票 / ETF）<input name="code" required pattern="[0-9]{6}" inputmode="numeric" maxlength="6" placeholder="如 600406 / 159929"></label><button class="btn primary" type="submit">分析这只证券</button></form><h3>加入自选观察</h3><form id="watch-form" class="inline-form"><label>证券代码（股票 / ETF）<input name="code" required inputmode="numeric" placeholder="股票或ETF的6位代码" maxlength="6"></label><label>证券名称<input name="name" required maxlength="32" placeholder="如 国电南瑞"></label><button class="btn primary" type="submit">＋ 加入自选</button></form><div class="table-wrap" id="watch-table"></div></div>
+      <div class="panel analyze-panel" id="analyze-panel"><div class="panel-head"><div><h3>个股分析 · 1～2周波段</h3><p id="analysis-title">选一只股票，查看历史K线、MACD、成交量、MA均线、RSI及缠论结构的综合观察结论。</p></div><span id="analysis-badge" class="pill muted">未选择</span></div><div id="swing-decision" class="swing-decision" aria-live="polite">选择一只股票，查看1～2周操作参考。</div><div id="chart-area" class="chart-placeholder">点击“分析”后，在此显示近60根历史收盘价及关键止盈止损线。</div><details class="analysis-details"><summary>查看技术指标与图表</summary><div id="technical-study" class="technical-study" aria-live="polite">
+        <div class="panel-head"><div><h3>MACD · 成交量 · 均线综合判断</h3><p>只使用已完成日K线；MACD(12,26,9)、前5日均量比、MA5/10/20/60、RSI14与ATR14</p></div></div>
+        <div id="integrated-decision" class="technical-decision"><p class="tip">选择股票后显示多指标和缠论交叉验证结果。</p></div>
+        <div id="signal-review" class="signal-review">缠论与指标证据待核验。</div>
+        <div id="technical-metrics" class="technical-metrics"></div>
+        <div class="technical-charts"><div><strong>MACD · DIF / DEA / 两倍柱状图</strong><div id="macd-chart" class="technical-chart"></div></div><div><strong>成交量 · 当日量 / 5日均量</strong><div id="volume-chart" class="technical-chart"></div></div></div>
+        <p id="technical-note" class="tip">MACD金叉、放量或RSI单一指标不代表买入确认。</p>
+      </div></details><div id="analysis-levels" class="analysis-levels"></div><div id="analysis-metrics" class="analysis-metrics"></div>
+      <details class="analysis-details"><summary>查看缠论结构与历史候选</summary><div id="chan-study" class="chan-study"><div class="panel-head"><div><h3>历史缠论结构核验（日线·固定旧笔口径）</h3><p>最近1年历史OHLC → 包含处理 → 右侧确认分型 → 固定旧笔 → 笔级中枢 → 一二三类结构候选（需次级别核验）。</p></div></div>
+      <div id="chan-plain" class="chan-plain" aria-live="polite"><div class="chan-placeholder">选择股票后，将用大白话说明：买入观察 / 卖出减仓观察 / 继续观察；当前处于底分型附近、顶分型附近、上升笔、下跌笔或中枢震荡。</div></div>
+      <div id="chan-status" class="signal-note">选择股票后显示结构状态。</div><div id="chan-points" class="chan-points"><p class="tip">尚无历史买卖点候选。所有信号只作研究，不直接交易。</p></div><div id="chan-chart" class="chan-chart"></div><div id="chan-metrics" class="chan-metrics"></div><p class="tip">结构采用固定旧笔与笔级重叠区规则，递归线段、次级别走势和严格背驰尚未完成，任何一二三类点只标“候选”。</p></div></details><p class="tip" id="analysis-note">联网上游日线可能滞后于盘中行情；演示数据绝不用于买卖。</p></div>
+    </section>
+        <section id="premarket">
+      <div class="section-heading"><div><span class="eyebrow">08 / PRE-OPEN & GLOBAL</span><h2>盘前竞价与海外市场对照</h2><p>中国市场时间09:15—09:30，结合最近收盘美股、今日日本韩国指数；行情不同步，不能视为因果预测。</p></div><span class="pill muted" id="premarket-pill">待采集</span></div>
+      <div class="panel"><div class="panel-head"><div><h3>盘前阶段与数据状态</h3><p id="premarket-status">尚未启动采集</p></div><button id="premarket-refresh" class="btn ghost">↻ 刷新盘前数据</button></div>
+        <div class="market-phase"><span>09:15—09:20 可撤单</span><span>09:20—09:25 不可撤单</span><span>09:25—09:30 结果观察</span></div>
+        <p class="tip">盘前分钟价是第三方来源的参考行情，<strong>不等于真实已成交价格或确定买卖盘</strong>。9:25最终撮合须由券商或交易所授权源验证；源缺少有效时间戳时显示不可用。</p>
+        <h3>持仓及自选股竞价参考</h3><div id="auction-table" class="table-wrap">尚无当日竞价数据</div>
+        <p id="auction-errors" class="tip"></p>
+      </div>
+      <div class="panel"><div class="panel-head"><div><h3>海外市场比较</h3><p>美国：最近已完成交易日的现金指数；日本和韩国：当天市场报价，不同假日或数据延迟会标明。</p></div></div>
+        <div id="global-market-grid" class="global-grid"></div>
+        <p id="global-status" class="tip">来源：AKShare东方财富全球指数；海外市场时间按纽约、东京、首尔分别解释。</p>
+      </div>
+    </section>
+    <section id="signals-add" class="trade-section">
+      <div class="section-heading"><div><span class="eyebrow">SIGNALS / ADD · WATCH ONLY</span><h2>新增观察 · V1</h2><p>仅显示后端通过V1的次日固定计划；9:45后进入触发区间才复核，最多新开1只，已有仓位不加仓。</p></div><span id="signal-add-badge" class="pill muted">未监测</span></div>
+      <div id="signal-add-note" class="signal-note">需要盘中真实轮询数据，演示、竞价或历史数据不会触发新增。</div>
+      <div id="signal-add-list" class="signal-list"></div>
+    </section>
+    <section id="signals-reduce" class="trade-section">
+      <div class="section-heading"><div><span class="eyebrow">SIGNALS / REDUCE · RISK FIRST</span><h2>提示减仓</h2><p>持仓止损、跌破观察价、两级止盈、全账户回撤预警会列在这里，先复核实际报价。</p></div><span id="signal-reduce-badge" class="pill muted">未监测</span></div>
+      <div id="signal-reduce-note" class="signal-note">信号不等于必须卖出，止损无法确保成交或封顶亏损。</div>
+      <div id="signal-reduce-list" class="signal-list"></div>
+    </section>
+    <section id="signals-switch" class="trade-section">
+      <div class="section-heading"><div><span class="eyebrow">SIGNALS / SWITCH · TWO-STEP REVIEW</span><h2>提示换仓</h2><p>把“需复核减仓的持仓”与“突破且预算允许的观察股”做对照；不是一键卖出买入。</p></div><span id="signal-switch-badge" class="pill muted">未监测</span></div>
+      <div id="signal-switch-note" class="signal-note">必须先确认减仓在券商实际成交，再手动更新持仓、现金和预算，才可重新评价买入。</div>
+      <div id="signal-switch-list" class="signal-list"></div>
+    </section>
+    <section id="signals-t" class="trade-section">
+      <div class="section-heading"><div><span class="eyebrow">SIGNALS / T · HOLDINGS ONLY</span><h2>做T条件观察</h2><p>先卖后买、保留底仓；只作条件提醒，不下单，也不保证能接回或赚取价差。</p></div><span id="t-count" class="pill muted">等待分钟行情</span></div>
+      <div class="panel t-intro"><div class="panel-head"><div><h3>先核条件，再决定是否做T</h3><p id="t-status">正在核验分时行情、可卖数量和本轮T记录。</p></div><button type="button" id="t-refresh" class="btn ghost">↻ 更新做T观察</button></div>
+        <div class="t-mode-grid"><div><strong>先卖后买 · 当前观察方式</strong><p>高抛只使用今日券商确认可卖的旧底仓；接回仅限本轮已登记的实际T卖出余量。普通减仓、止损卖出不会自动变成接回任务。</p></div><div><strong>先买后卖 · 暂不提供可执行提示</strong><p>需要额外现金、可卖旧底仓和完整风险额度；当前V1不在现有仓位追加买入，不能绕过新增风控。</p></div></div>
+        <p class="tip">股票及股票ETF按T+1核验；黄金股ETF也属于股票ETF，不能因名称含“黄金”就当作T+0。新买份额不能充当今天可卖底仓。只有100股时默认不做T；价差不足覆盖费用与滑点时不提示。</p>
+        <div id="t-settings" class="signal-note">费用滑点至少预留20元；以服务器本轮核验为准。</div>
+      </div>
+      <div class="panel"><div class="panel-head"><div><h3>逐只观察</h3><p>缺可卖数量时仅展示观察条件，不显示可执行股数；源数据过期时清空价格条件。</p></div></div><div id="t-observation-list" class="t-observation-grid">正在加载。</div></div>
+      <div class="panel-head"><h3>本轮做T提醒</h3><span id="signal-t-badge" class="pill muted">未监测</span></div>
+      <div id="signal-t-list" class="signal-list"></div>
+      <div class="panel"><h3>本地做T记录</h3><p class="tip">以下只登记已经真实发生的成交，不是委托。不会自动更改持仓、成本或现金；保存后仍需同步本地持仓与现金，并核对账户。未成交不要填写。</p>
+        <details class="disclosure"><summary>1 · 确认今日券商可卖数量</summary><form id="t-availability-form" class="t-entry-form"><label>证券<select name="code" required><option value="">选择持仓</option></select></label><label>今日可卖数量<input name="available_quantity" type="number" min="0" step="1" required></label><label class="t-confirm"><input name="availability_confirmed" type="checkbox" required>我已核对今天券商显示的可卖数量</label><button class="btn primary" type="submit">保存今日可卖数量</button></form><p class="tip">不能拿历史截图的可卖数量代替今日确认；可卖数量发生变化时重新核对。</p></details>
+        <details class="disclosure"><summary>2 · 登记本轮实际T高抛</summary><form id="t-sell-form" class="t-entry-form"><label>证券<select name="code" required><option value="">选择持仓</option></select></label><label>实际卖出数量<input name="quantity" type="number" min="1" step="1" required></label><label>实际卖出均价<input name="sell_price" type="number" min="0.0001" step="0.0001" required></label><label class="t-confirm"><input name="sell_filled" type="checkbox" required>这笔T高抛已经在券商真实成交</label><button class="btn primary" type="submit">登记已成交T高抛</button></form><p class="tip">只有明确作为本轮做T的高抛才登记；止损、风险减仓或普通卖出不要登记为T卖出。</p></details>
+        <details class="disclosure"><summary>3 · 登记实际接回</summary><form id="t-buyback-form" class="t-entry-form"><label>未结束T轮次<select name="cycle_id" required><option value="">选择未结束轮次</option></select></label><label>本次实际接回数量<input name="quantity" type="number" min="1" step="1" required></label><label>实际接回均价<input name="price" type="number" min="0.0001" step="0.0001" required></label><label class="t-confirm"><input name="buy_filled" type="checkbox" required>这笔接回已经在券商真实成交</label><button class="btn primary" type="submit">登记已成交接回</button></form><p class="tip">仅登记本轮实际接回，不得超过尚未接回的T卖出数量。今天买回的股票/股票ETF份额不计入今天可卖数量。</p></details>
+        <details class="disclosure"><summary>4 · 不再接回，保留现金</summary><form id="t-close-form" class="t-entry-form"><label>未结束T轮次<select name="cycle_id" required><option value="">选择未结束轮次</option></select></label><label class="t-confirm"><input name="leave_cash" type="checkbox" required>结束这轮观察，余量留现金，不追价接回</label><button class="btn ghost" type="submit">关闭本轮并留现金</button></form><p class="tip">结束记录不会下单；尾盘未接回不强迫买回，留现金也是一种结果。</p></details>
+        <div id="t-availability-list" class="table-wrap"></div><div id="t-cycle-list" class="table-wrap"></div>
+      </div>
+    </section>
+    <section id="settings"><div class="section-heading"><div><span class="eyebrow">08 / RULES</span><h2>交易规则参数</h2><p>V1固定规则通过下表核对；保存本地规则不会产生交易委托。</p></div></div><div class="panel"><h3>V1风险上限</h3><form id="strategy-settings-form" class="risk-form"><label>全部权益仓位上限 %<input name="max_exposure_pct" type="number" min="1" max="60" step="0.1" required></label><label>单一证券上限 %<input name="max_position_pct" type="number" min="1" max="15" step="0.1" required></label><label>同一行业上限 %<input name="max_sector_pct" type="number" min="1" max="30" step="0.1" required></label><label>最多持仓只数<input name="max_positions" type="number" min="1" max="4" step="1" required></label><label>费用滑点预留（元，至少20）<input name="fee_reserve" type="number" min="20" step="1" required></label><label>单笔总计划风险（元）<input name="per_trade_risk" type="number" min="21" max="150" step="1" required></label><label>账户风险预算（元）<input name="account_risk_budget" type="number" min="1" max="1000" step="1" required></label><button class="btn primary" type="submit">保存V1上限</button></form><p class="tip">仅可收紧已约定的上限；放宽规则需要新版本和明确复核，不作为盘中临时调整。</p></div><details class="disclosure"><summary>旧版比例模拟参数（V1不据此发信号）</summary><div class="panel"><p class="tip">以下仅影响旧版模拟，不替代V1固定价位、行业约束或费用预算。</p><form id="risk-form" class="risk-form"><label>普通个股模拟止损 %<input name="stop_stock" type="number" min="0.5" max="30" step="0.5" required></label><label>ETF模拟止损 %<input name="stop_etf" type="number" min="0.5" max="30" step="0.5" required></label><label>可转债模拟止损 %<input name="stop_convertible" type="number" min="0.5" max="30" step="0.5" required></label><label>默认第一止盈 %<input name="tp1_pct" type="number" min="1" max="100" step="1" required></label><label>默认第二止盈 %<input name="tp2_pct" type="number" min="1" max="100" step="1" required></label><label>单笔计划最大损失（元）<input name="per_trade_risk" type="number" min="1" required></label><label>单一股票仓位上限 %<input name="max_position_pct" type="number" min="1" max="60" step="1" required></label><label>最低收益 / 风险比<input name="min_reward_risk" type="number" min="1" max="10" step="0.1" required></label><label>突破后最多偏离 %<input name="max_breakout_extension_pct" type="number" min="0" max="10" step="0.5" required></label><button class="btn primary" type="submit">保存旧版模拟参数</button></form></div></details><div class="panel"><h3>每日自动执行</h3><p>关闭浏览器后，macOS 的 launchd 仍可按已设置的时间执行原有 <code>phase2.py</code>，网页下次打开会读取最新报告。安装前应先成功运行联网扫描。</p><div class="command">python install_schedule_mac.py --hour 16 --minute 45 --top 60</div><p class="tip">这里的16:45是Mac系统本地时间。若系统为日本时区，对应北京时间15:45。电脑关机、休眠或网络故障时不保证准时完成；周末及法定休市日也需要人工核对数据日期。</p></div></section>
+    <dialog class="plan-dialog" id="plan-dialog" aria-labelledby="plan-title">
+      <div class="modal-head"><div><div class="eyebrow">TRADE PLAN · FIXED LEVELS</div><h3 id="plan-title">设置关键止盈止损价</h3></div><button class="btn small ghost" type="button" id="plan-close">关闭 ×</button></div>
+      <p id="plan-description" class="tip">红色为止损，绿色为第一止盈，蓝色为第二止盈。这些价格是参考线，不会自动下单。</p>
+      <div class="btn-row"><button class="btn ghost" id="plan-suggest" type="button">刷新系统建议</button><button class="btn ghost" id="plan-manual" type="button">手动调整</button><button class="btn ghost" id="plan-prepare" type="button">读取完整日线，生成V1固定计划</button></div>
+      <div id="plan-setup" class="signal-note">新开仓须先通过后端形态核验；旧仓可单独记录固定退出条件。</div>
+      <form id="plan-form" class="plan-form">
+        <input type="hidden" name="code"><input type="hidden" name="prepared_id"><input type="hidden" name="exit_suggestion_token">
+        <label>行业（ETF按标的归组）<input name="sector" maxlength="40" required></label>
+        <label>信号日期<input name="signal_date" type="date"></label>
+        <label>触发下沿（元）<input name="trigger_price" type="number" step="0.0001" min="0.0001"></label>
+        <label><span id="plan-reference-label">允许最高成交价 Ecap（元）</span><input name="entry_price" type="number" step="0.0001" min="0.0001" required></label>
+        <label>固定止损 S0（元）<input name="stop_loss" type="number" step="0.0001" min="0.0001" required></label>
+        <label>第一分批退出目标 TP1（元）<input name="take_profit_1" type="number" step="0.0001" min="0.0001" required></label>
+        <label>第二分批退出目标 TP2（元）<input name="take_profit_2" type="number" step="0.0001" min="0.0001" required></label>
+        <label>附近已知压力价（可选）<input name="resistance_price" type="number" min="0.0001" step="0.0001" placeholder="按已核验依据填写"></label><label class="plan-checkbox"><input name="legacy_exit_only" type="checkbox">旧仓仅记录退出条件，不作为V1新开仓</label>
+        <fieldset class="plan-review"><legend>逐项人工核验（不自动勾选）</legend><label><input name="resistance_clear" type="checkbox">已核对附近压力位，可见上行空间至少2R</label><label><input name="fundamentals_ok" type="checkbox">财务/ETF属性与流动性已核验</label><label><input name="event_clear" type="checkbox">最新公告与重大事项无待处理风险</label><label><input name="corporate_action_clear" type="checkbox">除权除息、价格与股数口径已核验</label></fieldset>
+        <details class="plan-actual"><summary>真实成交与持有期（未知留空）</summary><p class="tip">系统建议模式仅锁定退出价；保存后重新打开可补真实成交信息，也可切换手动调整后填写。</p><div class="plan-actual-grid"><label>实际买入日期<input name="buy_date" type="date"></label><label>实际成交均价<input name="actual_entry" type="number" min="0.0001" step="0.0001"></label><label>初始实际数量<input name="initial_quantity" type="number" min="1" step="1"></label><label>TP1实际卖出数量<input name="tp1_sold_quantity" type="number" min="0" step="1"></label></div></details>
+        <div class="form-actions"><button class="btn primary" id="plan-save" type="submit">保存本地固定计划</button><button class="btn ghost" type="button" id="plan-reset">删除固定计划</button></div>
+      </form>
+      <p class="tip">不下调固定止损。100股在TP1全部退出；200股以上按百股取整分批。当前以价格、趋势和量价结构提醒为主；持有天数仅供复盘，不到期强制卖出。实际可卖数量和T+1仍需券商确认。</p>
+    </dialog>
+    <div id="trade-signal-popup" class="trade-signal-popup hidden" role="alertdialog" aria-label="交易条件提示" aria-live="assertive">
+      <div class="popup-top"><span id="trade-popup-tag" class="popup-tag">风险复核</span><span id="trade-popup-time" class="popup-time"></span><button id="trade-popup-close" class="popup-close" aria-label="关闭交易提示">×</button></div>
+      <strong id="trade-popup-title">待复核的交易信号</strong>
+      <p id="trade-popup-reason"></p>
+      <div id="trade-popup-level" class="popup-level"></div>
+      <div class="popup-actions"><button class="btn small primary" id="trade-popup-detail">查看分栏</button><button class="btn small ghost" id="trade-popup-dismiss">知道了</button></div>
+      <small>仅公开行情研究提示，未核验交易所级时间戳；不会自动下单。</small>
+    </div>
+    <footer>衡势 v3.6.1 · 公开行情仅供研究 · 本地台账，不自动交易</footer>
+  </main>
+</body>
+</html>

@@ -17,3 +17,20 @@
 - 安装前自动备份旧配置及已有的交易日志、净值日志到 `~/Library/Application Support/AshareAB/backups/`，不会改动原文件。
 - 安装后检查网页与文件均显示 V3.6.1。
 - 如遇行情超过7.5秒、价格冻结或没有新的买卖提醒，双击 `诊断行情状态.command`，检查源时间是否核验和接口错误。未经核验的价格仍可显示参考净值，但不会触发新的交易提示。
+
+
+## 已展开的源码
+
+完整源码现已直接放在仓库根目录，可浏览和逐文件修改。完整功能与配置说明见 [源码使用说明](SOURCE_SETUP.md)。
+
+首次从源码运行：
+
+```bash
+cp config.example.json config.json
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python web_dashboard.py --open
+```
+
+示例配置是无持仓的虚构账户。`config.json` 和 `output/` 仅在本地维护，已通过 `.gitignore` 排除。

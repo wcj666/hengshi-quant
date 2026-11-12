@@ -1,0 +1,66 @@
+{
+  "baseline_date": "2026-01-01",
+  "baseline_equity": 100000.0,
+  "max_additional_loss": 1000.0,
+  "cash": 100000.0,
+  "positions": [],
+  "watchlist": [],
+  "pressure_scenarios": [
+    {
+      "name": "温和调整",
+      "stock": -0.03,
+      "etf": -0.02,
+      "convertible": -0.05
+    },
+    {
+      "name": "同步下跌",
+      "stock": -0.06,
+      "etf": -0.04,
+      "convertible": -0.1
+    },
+    {
+      "name": "急跌压力",
+      "stock": -0.1,
+      "etf": -0.07,
+      "convertible": -0.18
+    }
+  ],
+  "history_pause_seconds": 0.5,
+  "alert_levels": [],
+  "risk_settings": {
+    "stop_stock": 5.0,
+    "stop_etf": 4.0,
+    "stop_convertible": 10.0,
+    "per_trade_risk": 150.0,
+    "max_position_pct": 15.0,
+    "tp1_pct": 10.0,
+    "tp2_pct": 15.0
+  },
+  "trade_plans": {},
+  "strategy_v1": {
+    "enabled": true,
+    "version": "1.0",
+    "per_trade_risk": 150.0,
+    "min_fees": 20.0,
+    "max_position_pct": 15.0,
+    "max_sector_pct": 30.0,
+    "max_exposure_pct": 60.0,
+    "max_positions": 4,
+    "loss_budget": 1000.0,
+    "pause_drawdown": 500.0,
+    "reduce_drawdown": 800.0,
+    "fee_reserve": 20.0,
+    "account_risk_budget": 1000.0,
+    "started_at": "2026-11-11T10:13:35.972322+08:00",
+    "legacy_codes": [],
+    "exit_mode": "price_first"
+  },
+  "t_settings": {
+    "enabled": true,
+    "mode": "sell_first",
+    "fee_reserve": 20.0,
+    "max_fraction": 0.3333333333333333,
+    "max_cycles_per_code": 1,
+    "last_open_time": "14:45"
+  }
+}
