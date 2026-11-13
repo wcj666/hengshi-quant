@@ -26,7 +26,8 @@ from asset_history import history_by_asset
 from technical_engine import analyze_technical, combine_chan_technical
 from signal_review import inspect as inspect_signal
 from swing_analysis import analyze_swing
-from portfolio_quotes import snapshot_selected_akshare
+from portfolio_quotes import snapshot_selected_akshare, snapshot_selected_tencent
+from close_review import build_close_review
 from quote_health import parse_provider_time
 from risk_extensions import simulate_reduction
 from portfolio_journal import read_lines,log_manual_trade,daily_curve
@@ -566,6 +567,37 @@ def create_app(folder:Path=ROOT):
                        count=len(rows),shortlist=rows,stale=stale,status=status,
                        excluded=sorted(excluded),disclaimer=data.get('disclaimer','仅供研究，非自动下单'),
                        strategy_version=data.get('strategy_version'),blockers=data.get('blockers',[]),source_errors=data.get('source_errors',[]))
+
+    @app.route('/close-review')
+    def close_review_page():
+        return render_template('close_review.html')
+
+    @app.route('/api/close-review')
+    def close_review_api():
+        """Build a read-only after-close plan from one complete quote batch."""
+        with WRITE_LOCK:
+            cfg = config()
+        snapshot = latest_broker_snapshot(output, cfg)
+        quote_cfg = {'positions': (snapshot or {}).get('positions') or cfg.get('positions', [])}
+        feed, errors = snapshot_selected_tencent(quote_cfg, include_watch=False, deadline_seconds=7.5)
+        quotes = {}
+        for (kind, code), quote in feed.items():
+            quotes[code] = {'price': quote[0], 'name': quote[1], 'previous_close': quote[2],
+                            'source_timestamp': quote[3]}
+        candidates = []
+        try:
+            daily = json.loads((output / 'daily_observe.json').read_text(encoding='utf-8'))
+            if daily.get('mode') == 'live' and isinstance(daily.get('shortlist'), list):
+                candidates = daily['shortlist']
+        except (OSError, ValueError, TypeError):
+            pass
+        complete_codes = {str(x.get('code')).zfill(6) for x in (snapshot or {}).get('positions', [])}
+        data_verified = bool(snapshot and not errors and complete_codes.issubset(quotes))
+        stamps = [quotes[code].get('source_timestamp') for code in complete_codes if code in quotes]
+        asof = max(stamps) if stamps else datetime.now(ZoneInfo('Asia/Shanghai')).isoformat(timespec='seconds')
+        return jsonify(build_close_review(cfg, snapshot, quotes, candidates,
+                                          asof=asof, data_verified=data_verified,
+                                          quote_errors=errors))
 
     @app.route('/api/daily-excludes',methods=['POST','DELETE'])
     def daily_exclude():

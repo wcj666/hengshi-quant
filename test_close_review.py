@@ -1,0 +1,63 @@
+import unittest
+
+from close_review import build_close_review
+
+
+class CloseReviewTests(unittest.TestCase):
+    def setUp(self):
+        self.config = {"strategy_v1": {"max_position_pct": 15, "max_exposure_pct": 60,
+                                       "max_positions": 4, "per_trade_risk": 150,
+                                       "fee_reserve": 20}}
+        self.snapshot = {"asof": "2026-11-13T15:07:00+08:00", "available_cash": 10000,
+                         "positions": [
+                             {"code": "600001", "name": "弱势股", "type": "stock", "quantity": 500,
+                              "available_quantity": 500, "cost": 20},
+                             {"code": "600002", "name": "弱势ETF", "type": "etf", "quantity": 1000,
+                              "available_quantity": 1000, "cost": 10},
+                             {"code": "600003", "name": "中性股", "type": "stock", "quantity": 100,
+                              "available_quantity": 100, "cost": 30},
+                             {"code": "600004", "name": "强势股", "type": "stock", "quantity": 100,
+                              "available_quantity": 100, "cost": 30},
+                             {"code": "600005", "name": "第五只", "type": "stock", "quantity": 100,
+                              "available_quantity": 100, "cost": 30},
+                         ]}
+        self.quotes = {
+            "600001": {"price": 18, "previous_close": 20, "source_timestamp": "2026-11-13T07:00:00+00:00"},
+            "600002": {"price": 9.5, "previous_close": 10, "source_timestamp": "2026-11-13T07:00:00+00:00"},
+            "600003": {"price": 30, "previous_close": 30, "source_timestamp": "2026-11-13T07:00:00+00:00"},
+            "600004": {"price": 31, "previous_close": 30, "source_timestamp": "2026-11-13T07:00:00+00:00"},
+            "600005": {"price": 30, "previous_close": 30, "source_timestamp": "2026-11-13T07:00:00+00:00"},
+        }
+
+    def test_count_cap_closes_weakest_and_cash_reserve_is_explicit(self):
+        result = build_close_review(self.config, self.snapshot, self.quotes,
+                                    data_verified=True)
+        self.assertEqual(result["position_count"], 5)
+        self.assertEqual(result["sell_plan"][0]["code"], "600001")
+        self.assertGreaterEqual(result["cash_policy"]["minimum_reserve"], 15000)
+        self.assertEqual(result["execution_status"], "可生成次日计划")
+
+    def test_position_cap_is_lot_rounded(self):
+        result = build_close_review(self.config, self.snapshot, self.quotes,
+                                    data_verified=True)
+        row = next(x for x in result["sell_plan"] if x["code"] == "600002")
+        self.assertEqual(row["quantity"] % 100, 0)
+
+    def test_incomplete_data_blocks_execution(self):
+        result = build_close_review(self.config, self.snapshot, {"600001": self.quotes["600001"]},
+                                    data_verified=False)
+        self.assertEqual(result["execution_status"], "仅供复盘，暂不可执行")
+        self.assertTrue(result["errors"])
+
+    def test_buy_requires_explicit_review_evidence(self):
+        candidate = {"code": "600006", "name": "候选", "entry_price": 10,
+                     "stop_loss": 9, "take_profit_1": 12, "take_profit_2": 13,
+                     "setup_verified": False, "review_complete": False}
+        result = build_close_review(self.config, self.snapshot, self.quotes, [candidate],
+                                    data_verified=True)
+        self.assertFalse(result["buy_plan"][0]["approved"])
+        self.assertEqual(result["buy_plan"][0]["quantity"], 0)
+
+
+if __name__ == "__main__":
+    unittest.main()
