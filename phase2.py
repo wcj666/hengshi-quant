@@ -8,6 +8,7 @@ import pandas as pd
 import numpy as np
 
 from app import ROOT, OUT, load_config, code_str, stock_history, score_stock, snapshot_akshare, portfolio, scenarios
+from portfolio_quotes import tencent_full_snapshot
 from trade_levels import make_levels
 from chan_analysis import analyze_chan
 from daily_observe import select_five
@@ -26,16 +27,20 @@ def full_snapshot(mode):
             code = ['600406','000682','601179','002714','300274','002929','002641','002889'][i] if i<8 else (f'{600000+i:06d}' if i%2 else f'{200000+i:06d}')
             data.append({'code':code,'name':names[i] if i<8 else f'演示股票{i:04}', 'price':round(float(rng.uniform(3,100)),2),'pct':round(float(rng.normal(1.2,3)),2),'amount':round(float(rng.uniform(0.5,40)*1e8),0),'turnover':round(float(rng.uniform(0.5,15)),2),'volume_ratio':round(float(rng.uniform(.5,3)),2),'market_cap':round(float(rng.uniform(15,1500)*1e8),0)})
         return pd.DataFrame(data),'演示合成数据'
-    import akshare as ak
-    raw=ak.stock_zh_a_spot_em()
-    required=['代码','名称','最新价','涨跌幅','成交额','换手率','量比']
-    missing=[x for x in required if x not in raw.columns]
-    if missing: raise RuntimeError('全市场快照接口字段缺失: '+','.join(missing))
-    frame=raw.rename(columns=FIELDS).copy()
-    for key in ('price','pct','amount','turnover','volume_ratio','market_cap'):
-        if key in frame:frame[key]=pd.to_numeric(frame[key], errors='coerce')
-    frame['code']=frame['code'].astype(str).str.zfill(6)
-    return frame,'AKShare stock_zh_a_spot_em，时间戳未由交易所核验'
+    try:
+        import akshare as ak
+        raw=ak.stock_zh_a_spot_em()
+        required=['代码','名称','最新价','涨跌幅','成交额','换手率','量比']
+        missing=[x for x in required if x not in raw.columns]
+        if missing:raise RuntimeError('全市场快照接口字段缺失: '+','.join(missing))
+        frame=raw.rename(columns=FIELDS).copy()
+        for key in ('price','pct','amount','turnover','volume_ratio','market_cap'):
+            if key in frame:frame[key]=pd.to_numeric(frame[key], errors='coerce')
+        frame['code']=frame['code'].astype(str).str.zfill(6)
+        return frame,'AKShare stock_zh_a_spot_em，时间戳未由交易所核验'
+    except Exception as primary_error:
+        frame,source,errors=tencent_full_snapshot()
+        return frame,source+'；东方财富失败：'+type(primary_error).__name__
 
 
 def sector_snapshot(mode):
@@ -46,15 +51,9 @@ def sector_snapshot(mode):
             up=int(rng.integers(5,55)); down=int(rng.integers(4,45))
             data.append({'name':name,'pct':round(float(rng.normal(1,2)),2),'up':up,'down':down,'leader':'演示龙头','leader_pct':round(float(rng.uniform(1,9)),2)})
         return pd.DataFrame(data),'演示合成数据'
-    import akshare as ak
-    raw=ak.stock_board_industry_name_em()
-    required=['板块名称','涨跌幅']
-    missing=[x for x in required if x not in raw.columns]
-    if missing:raise RuntimeError('行业接口字段缺失: '+','.join(missing))
-    out=raw.rename(columns=SECTOR_FIELDS)
-    for key in ['pct','up','down','leader_pct']:
-        if key in out: out[key]=pd.to_numeric(out[key],errors='coerce')
-    return out,'AKShare stock_board_industry_name_em，行业分类来自数据源'
+    # Tencent's public quote endpoint has no sector classification. Keep the
+    # section explicit and empty instead of calling a second rate-limited source.
+    return pd.DataFrame(columns=list(SECTOR_FIELDS.values())), '腾讯行情未提供行业分类，行业榜待补'
 
 
 def filter_universe(df, top_n,cfg=None):
@@ -92,9 +91,8 @@ def v1_benchmark_history(mode):
     refreshed_after_close=bool(fetched and (now.hour*60+now.minute<905 or fetched.hour*60+fetched.minute>=905))
     if stamp==now.date().isoformat() and refreshed_after_close and cached is not None and len(cached)>=120:return cached,None
     try:
-        import akshare as ak
-        raw=ak.index_zh_a_hist(symbol='000300',period='daily',start_date=(pd.Timestamp(now)-pd.Timedelta(days=3*365+60)).strftime('%Y%m%d'),end_date=now.strftime('%Y%m%d'))
-        frame=raw.rename(columns={'日期':'date','开盘':'open','收盘':'close','最高':'high','最低':'low','成交量':'volume','成交额':'amount'})
+        from asset_history import benchmark_history
+        frame=benchmark_history((now.date()-pd.Timedelta(days=3*365+60)).strftime('%Y%m%d'),now.strftime('%Y%m%d'))
         frame,error=completed_history(frame,now)
         if error or frame is None or len(frame)<120:raise ValueError(error or '完整沪深300日K不足120根')
         from strategy_runtime import write
@@ -352,7 +350,7 @@ def main():
     except Exception as e:
         errors.append('行业抓取失败: '+str(e));sectors=pd.DataFrame()
     if args.mode=='live':
-        prices,feed_errors=snapshot_akshare();errors.extend(feed_errors)
+        prices,feed_errors=snapshot_akshare(cfg);errors.extend(feed_errors)
     else:prices={}
     alerts,p_df,missing,equity,loss,remain=alert_rules(cfg,prices,universe,verified,args.mode)
     daily=select_five(verified,cfg,args.mode)

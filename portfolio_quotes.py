@@ -149,6 +149,60 @@ def snapshot_selected_tencent(cfg, *, include_watch=True, deadline_seconds=7.5):
         return {}, errors + [f'腾讯批量行情失败：{type(exc).__name__}: {exc}']
 
 
+def tencent_full_snapshot(*, deadline_seconds=45.0):
+    """Fetch a broad A-share snapshot from Tencent for full-market fallback.
+
+    Tencent does not publish industry labels or a reliable volume-ratio field
+    in this endpoint. Those fields stay empty so the scanner cannot invent them.
+    """
+    import pandas as pd
+    if not 5 <= deadline_seconds <= 180:
+        raise ValueError('全市场腾讯查询截止时间必须在5—180秒之间')
+    codes=[*(f'{x:06d}' for x in range(1,4000)),
+           *(f'{x:06d}' for x in range(300000,301000)),
+           *(f'{x:06d}' for x in range(600000,606000)),
+           *(f'{x:06d}' for x in range(688000,689000))]
+    symbols=[_tencent_symbol(c) for c in codes]
+    chunks=[symbols[i:i+400] for i in range(0,len(symbols),400)]
+    started=datetime.now(timezone.utc)
+
+    def fetch(chunk):
+        response=requests.get('https://qt.gtimg.cn/',params={'q':','.join(chunk)},
+            headers={'Referer':'https://gu.qq.com/','User-Agent':'Mozilla/5.0'},timeout=(3,8))
+        response.raise_for_status()
+        return response.content.decode('gb18030','replace')
+
+    rows=[];errors=[]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures=[pool.submit(fetch,chunk) for chunk in chunks]
+        finished,_=wait(futures,timeout=deadline_seconds)
+        for future in futures:
+            if future not in finished:
+                errors.append('腾讯全市场批次超时');continue
+            try:
+                text=future.result()
+                for symbol,body in re.findall(r'v_((?:sh|sz)\d{6})\s*=\s*"([^"\r\n]*)"\s*;',text):
+                    fields=body.split('~')
+                    if len(fields)<39 or not re.fullmatch(r'\d{6}',fields[2]):continue
+                    current=_price(fields[3]);previous=_price(fields[4])
+                    if current is None or previous is None:continue
+                    amount=None
+                    if len(fields)>35:
+                        pieces=fields[35].split('/')
+                        if len(pieces)>=3:amount=_price(pieces[2])
+                    market_cap=_price(fields[72]) if len(fields)>72 else None
+                    turnover=_price(fields[38]) if len(fields)>38 else None
+                    rows.append({'code':fields[2],'name':fields[1],'price':current,
+                        'pct':round((current/previous-1)*100,4),'amount':amount or 0.0,
+                        'turnover':turnover if turnover is not None else 0.0,
+                        'volume_ratio':None,'market_cap':market_cap or 0.0})
+            except Exception as exc:errors.append(f'腾讯批次失败：{type(exc).__name__}: {exc}')
+    if not rows:raise RuntimeError('腾讯全市场行情没有返回有效股票')
+    frame=pd.DataFrame(rows).drop_duplicates('code').reset_index(drop=True)
+    elapsed=(datetime.now(timezone.utc)-started).total_seconds()
+    return frame, f'腾讯公开行情 qt.gtimg.cn，全市场批次耗时{elapsed:.1f}秒（行业和量比字段未提供）', errors
+
+
 def _stock_quote(ak, code):
     if ak is None:
         return _security_quote(code)

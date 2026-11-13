@@ -33,7 +33,10 @@ def code_str(x):
     return str(x).zfill(6)
 
 
-def snapshot_akshare():
+def snapshot_akshare(cfg=None):
+    if cfg is not None:
+        from portfolio_quotes import snapshot_selected_tencent
+        return snapshot_selected_tencent(cfg, include_watch=True, deadline_seconds=7.5)
     import akshare as ak
     result={}
     errors=[]
@@ -73,6 +76,11 @@ def snapshot_akshare():
 
 
 def stock_history(code, begin):
+    try:
+        from asset_history import tencent_history
+        return tencent_history(code, 'stock', begin, date.today().strftime('%Y%m%d'))
+    except Exception:
+        pass
     import akshare as ak
     df=ak.stock_zh_a_hist(symbol=code, period='daily', start_date=begin,
                           end_date=date.today().strftime('%Y%m%d'), adjust='qfq')
