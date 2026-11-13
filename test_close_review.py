@@ -58,6 +58,26 @@ class CloseReviewTests(unittest.TestCase):
         self.assertFalse(result["buy_plan"][0]["approved"])
         self.assertEqual(result["buy_plan"][0]["quantity"], 0)
 
+    def test_unavailable_t1_quantity_is_reported_separately(self):
+        snapshot = {**self.snapshot, "positions": [
+            {**row, "available_quantity": 0 if row["code"] == "600001" else row["available_quantity"]}
+            for row in self.snapshot["positions"]
+        ]}
+        result = build_close_review(self.config, snapshot, self.quotes, data_verified=True)
+        pending = next(item for item in result["pending_sell_plan"] if item["code"] == "600001")
+        self.assertEqual(pending["quantity"], 500)
+        self.assertEqual(pending["available_now"], 0)
+
+    def test_cash_policy_exposes_immediate_and_full_plan_values(self):
+        snapshot = {**self.snapshot, "positions": [
+            {**row, "available_quantity": 0 if row["code"] == "600001" else row["available_quantity"]}
+            for row in self.snapshot["positions"]
+        ]}
+        result = build_close_review(self.config, snapshot, self.quotes, data_verified=True)
+        policy = result["cash_policy"]
+        self.assertGreaterEqual(policy["cash_after_all_planned_sales"], policy["cash_after_planned_sales"])
+        self.assertIn("available_after_all_planned_sales", policy)
+
 
 if __name__ == "__main__":
     unittest.main()

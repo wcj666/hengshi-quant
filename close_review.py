@@ -114,17 +114,15 @@ def build_close_review(config, snapshot, quotes, candidates=None, *, asof=None,
     ))
     current_exposure_pct = money(market_value / equity * 100) if equity else None
     sell_plan = []
-    planned = {row["code"]: 0 for row in rows}
+    pending_sell_plan = []
+    requested_by_code = {}
+    reasons_by_code = {}
     active_codes = {row["code"] for row in rows}
 
     def add_sell(row, quantity, reason):
-        quantity = min(row["quantity"], row["sellable"], _lot(quantity, up=True))
-        if quantity <= 0:
-            return
-        planned[row["code"]] = min(row["quantity"], planned[row["code"]] + quantity)
-        sell_plan.append({"code": row["code"], "name": row["name"], "quantity": quantity,
-                          "price": row["price"], "value": money(quantity * row["price"]),
-                          "reason": reason, "source_timestamp": row["source_timestamp"]})
+        requested = min(row["quantity"], _lot(quantity, up=True))
+        requested_by_code[row["code"]] = max(requested_by_code.get(row["code"], 0), requested)
+        reasons_by_code.setdefault(row["code"], []).append(reason)
 
     if complete and len(active_codes) > max_positions:
         ordered = sorted(rows, key=lambda row: row["daily_pct"] if row["daily_pct"] is not None else 0)
@@ -134,7 +132,7 @@ def build_close_review(config, snapshot, quotes, candidates=None, *, asof=None,
 
     position_cap = equity * max_position_pct / 100 if equity is not None else None
     for row in rows:
-        if not complete or row["code"] not in active_codes or row["price"] is None or row["code"] in {x["code"] for x in sell_plan if x["quantity"] == row["quantity"]}:
+        if not complete or row["code"] not in active_codes or row["price"] is None or requested_by_code.get(row["code"], 0) >= row["quantity"]:
             continue
         excess = row["value"] - position_cap
         if excess > 0:
@@ -142,42 +140,53 @@ def build_close_review(config, snapshot, quotes, candidates=None, *, asof=None,
                      f"单只市值超过{max_position_pct:g}%上限，减至约¥{position_cap:,.2f}")
 
     planned_value = sum(
-        (row["quantity"] - planned[row["code"]]) * row["price"]
+        (row["quantity"] - requested_by_code.get(row["code"], 0)) * row["price"]
         for row in rows if row["price"] is not None
     ) if complete else None
     exposure_cap = equity * max_exposure_pct / 100 if equity is not None else None
     if complete and planned_value > exposure_cap:
         remaining = planned_value - exposure_cap
         for row in sorted(rows, key=lambda item: item["daily_pct"] if item["daily_pct"] is not None else 0):
-            available = row["quantity"] - planned[row["code"]]
+            available = row["quantity"] - requested_by_code.get(row["code"], 0)
             if available <= 0:
                 continue
             quantity = min(available, _lot(remaining / row["price"], up=True))
             if quantity <= 0:
                 continue
-            add_sell(row, quantity, f"组合仓位超过{max_exposure_pct:g}%上限，继续降低总敞口")
+            add_sell(row, requested_by_code.get(row["code"], 0) + quantity,
+                     f"组合仓位超过{max_exposure_pct:g}%上限，继续降低总敞口")
             remaining -= quantity * row["price"]
             if remaining <= 0:
                 break
 
-    # Merge repeated reductions for a compact plan.
-    merged = {}
-    for item in sell_plan:
-        merged.setdefault(item["code"], {**item, "quantity": 0, "value": 0.0, "reasons": []})
-        merged[item["code"]]["quantity"] += item["quantity"]
-        merged[item["code"]]["value"] += item["value"]
-        if item["reason"] not in merged[item["code"]]["reasons"]:
-            merged[item["code"]]["reasons"].append(item["reason"])
-    sell_plan = []
-    for item in merged.values():
-        item["quantity"] = min(item["quantity"], next(row["sellable"] for row in rows if row["code"] == item["code"]))
-        item["value"] = money(item["quantity"] * item["price"])
-        item["reason"] = "；".join(item.pop("reasons"))
-        sell_plan.append(item)
+    # Build the executable and pending portions after all constraints have been
+    # evaluated. This keeps T+1 inventory from causing duplicate exposure cuts.
+    for row in rows:
+        required = min(row["quantity"], requested_by_code.get(row["code"], 0))
+        available = min(required, row["sellable"])
+        reasons = "；".join(dict.fromkeys(reasons_by_code.get(row["code"], [])))
+        if available:
+            sell_plan.append({"code": row["code"], "name": row["name"], "quantity": available,
+                              "price": row["price"], "value": money(available * row["price"]),
+                              "reason": reasons, "source_timestamp": row["source_timestamp"]})
+        pending = max(0, required - row["sellable"])
+        if pending:
+            pending_sell_plan.append({
+                "code": row["code"], "name": row["name"], "quantity": pending,
+                "price": row["price"], "value": money(pending * row["price"]),
+                "available_now": row["sellable"],
+                "reason": "计划数量超过当前可卖数量，待T+1或下一次券商对账后复核",
+                "detail": reasons,
+                "source_timestamp": row["source_timestamp"],
+            })
 
     proceeds = money(sum(item["value"] - _fee(next(row["type"] for row in rows if row["code"] == item["code"]), "sell", item["value"]) for item in sell_plan)) if complete else 0.0
     cash_after_sales = money(cash + proceeds) if complete else None
     buy_budget = money(max(0.0, cash_after_sales - target_reserve)) if cash_after_sales is not None else None
+    all_planned = sell_plan + pending_sell_plan
+    all_proceeds = money(sum(item["value"] - _fee(next(row["type"] for row in rows if row["code"] == item["code"]), "sell", item["value"]) for item in all_planned)) if complete else 0.0
+    cash_after_all_sales = money(cash + all_proceeds) if complete else None
+    buy_budget_after_all_sales = money(max(0.0, cash_after_all_sales - target_reserve)) if cash_after_all_sales is not None else None
     remaining_positions = len(rows) - sum(1 for item in sell_plan if item["quantity"] >= next(row["quantity"] for row in rows if row["code"] == item["code"]))
     buy_plan = []
     for candidate in candidates or []:
@@ -223,10 +232,13 @@ def build_close_review(config, snapshot, quotes, candidates=None, *, asof=None,
             "minimum_reserve": target_reserve,
             "cash_after_planned_sales": cash_after_sales,
             "available_for_new_buys": buy_budget,
+            "cash_after_all_planned_sales": cash_after_all_sales,
+            "available_after_all_planned_sales": buy_budget_after_all_sales,
             "formula": f"至少保留总资产的{100 - max_exposure_pct:g}%，并覆盖两笔单笔风险和费用预留",
         },
         "positions": rows,
         "sell_plan": sell_plan,
+        "pending_sell_plan": pending_sell_plan,
         "buy_plan": buy_plan,
         "notes": [
             "卖出数量按100股/份整数手和已确认可卖数量计算。",
