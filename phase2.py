@@ -372,6 +372,7 @@ def main():
     watch=universe[universe.code.isin(watch_codes)].copy()
     watch.to_csv(OUT/'watch_quotes.csv',index=False,encoding='utf-8-sig')
     metadata={'mode':args.mode,'generated_at':datetime.now().astimezone().isoformat(timespec='seconds'),
+              'scan_ok':True,
               'config_hash':hashlib.sha256(json.dumps(cfg,sort_keys=True,ensure_ascii=False).encode()).hexdigest(),
               'universe_count':len(universe),'verified_count':len(verified),
               'source_notes':sources,'errors_count':len(errors),

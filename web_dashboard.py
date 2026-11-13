@@ -243,6 +243,7 @@ def create_app(folder:Path=ROOT):
         metadata={}
         try:metadata=json.loads((output/'run_meta.json').read_text(encoding='utf-8'))
         except (OSError,ValueError):pass
+        scan_ok=metadata.get('scan_ok',True)
         fresh=False
         minutes_old=None
         reason='尚未运行，或者报告没有来源标识'
@@ -253,13 +254,14 @@ def create_app(folder:Path=ROOT):
                 if dt.tzinfo is None: dt=dt.replace(tzinfo=timezone.utc)
                 minutes_old=max(0.0,(datetime.now(timezone.utc)-dt.astimezone(timezone.utc)).total_seconds()/60)
             except (TypeError, ValueError):pass
-            if metadata.get('mode')!='live':reason='当前报告为演示数据，不能用于交易'
+            if not scan_ok:reason='本次扫描失败，旧报告已停用：'+str(metadata.get('failure') or '请重新执行联网筛选')[-300:]
+            elif metadata.get('mode')!='live':reason='当前报告为演示数据，不能用于交易'
             elif metadata.get('config_hash')!=json_hash(cfg):reason='修改了设置或持仓，请重新运行真实行情'
             elif minutes_old is None or minutes_old>20:reason='快照超过20分钟，请重新扫描'
             else:
                 fresh=True
                 reason='仅代表近期抓取快照，未核验交易所时间戳'
-        qrows=safe_csv(output/'watch_quotes.csv',6000) if metadata.get('mode')=='live' else []
+        qrows=safe_csv(output/'watch_quotes.csv',6000) if metadata.get('mode')=='live' and scan_ok else []
         # Watch quotes come from the same complete market snapshot as the report.
         lookup={r['code']:r for r in qrows if r.get('code')}
         watches=[]
@@ -274,7 +276,7 @@ def create_app(folder:Path=ROOT):
                             'asset_type':p.get('type','stock'),
                             'pct':quote.get('pct'),'amount':quote.get('amount'),
                             'volume_ratio':quote.get('volume_ratio'),'levels':plan})
-        pdata=safe_csv(output/'portfolio.csv',500) if fresh else []
+        pdata=safe_csv(output/'portfolio.csv',500) if fresh and scan_ok else []
         quotes={}
         for item in pdata:
             try:
@@ -297,10 +299,11 @@ def create_app(folder:Path=ROOT):
                 'display_snapshot':load_display_snapshot(output/'last_account_snapshot.json',cfg),
                 'broker_snapshot':latest_broker_snapshot(output,cfg),
                 'fresh':fresh,'fresh_reason':reason,'minutes_old':round(minutes_old,1) if minutes_old is not None else None,
-                'top':safe_csv(output/'verified_top.csv',30),
-                'candidates':safe_csv(output/'market_candidates.csv',30),
-                'sectors':safe_csv(output/'sector_rank.csv',25),
-                'alerts':safe_csv(output/'alerts.csv',50),
+                'scan_ok':scan_ok,'scan_failure':metadata.get('failure'),
+                'top':safe_csv(output/'verified_top.csv',30) if scan_ok else [],
+                'candidates':safe_csv(output/'market_candidates.csv',30) if scan_ok else [],
+                'sectors':safe_csv(output/'sector_rank.csv',25) if scan_ok else [],
+                'alerts':safe_csv(output/'alerts.csv',50) if scan_ok else [],
                 'job':dict(JOB)}
         return jsonify(result)
 
@@ -761,6 +764,17 @@ def create_app(folder:Path=ROOT):
             args=[sys.executable,str(folder/'phase2.py'),'--mode',mode,'--top',str(top)]
             result=subprocess.run(args,cwd=str(folder),capture_output=True,text=True,timeout=1800)
             msg=((result.stdout or '')+'\n'+(result.stderr or ''))[-3500:]
+            if result.returncode != 0:
+                failure={'mode':mode,'generated_at':datetime.now().astimezone().isoformat(timespec='seconds'),
+                         'scan_ok':False,'failure':msg or '扫描失败','universe_count':0,
+                         'verified_count':0,'daily_observe_count':0,'daily_observe_asof':None,
+                         'errors_count':1,'quote_time_verified':False}
+                tmp=output/'run_meta.json.tmp'
+                tmp.write_text(json.dumps(failure,ensure_ascii=False,indent=2),encoding='utf-8')
+                tmp.replace(output/'run_meta.json')
+                for name in ('market_candidates.csv','verified_top.csv','sector_rank.csv','alerts.csv','portfolio.csv','report_v2.html'):
+                    try:(output/name).unlink()
+                    except FileNotFoundError:pass
             with JOB_LOCK:
                 JOB.update(running=False,finished=datetime.now().astimezone().isoformat(timespec='seconds'),
                            returncode=result.returncode,message=msg or '扫描完成')
