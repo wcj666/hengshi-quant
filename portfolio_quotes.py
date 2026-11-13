@@ -76,6 +76,12 @@ def _parse_tencent_quotes(text, targets):
         metadata={'open':_price(fields[5]) if len(fields)>5 else None,'upper_limit':limit,'lower_limit':lower,'limit_status_verified':limit is not None and lower is not None,
                   'at_limit_down':bool(_price(fields[3])<=lower+0.000001) if lower is not None else None,
                   'at_limit_up':bool(_price(fields[3])>=limit-0.000001) if limit is not None else None}
+        # Snapshot order book for conservative PAPER fills only. Missing sizes
+        # remain missing; neither last price nor daily volume substitutes for it.
+        for name,index in (('bid1',9),('ask1',19)):
+            metadata[name]=_price(fields[index]) if len(fields)>index else None
+            lots=_price(fields[index+1]) if len(fields)>index+1 else None
+            metadata[name+'_shares']=int(lots*100) if lots is not None else None
         quote = (_price(fields[3]), fields[1], _price(fields[4]), stamp, metadata)
         for key in keys:
             feed[key] = quote

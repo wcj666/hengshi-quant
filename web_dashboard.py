@@ -206,6 +206,27 @@ def create_app(folder:Path=ROOT):
     @app.route('/')
     def index(): return render_template('dashboard.html',csrf=CSRF)
 
+    @app.route('/paper-contest')
+    def paper_contest_page():
+        return render_template('paper_contest.html')
+
+    @app.route('/api/paper-contest')
+    def api_paper_contest():
+        from paper_view import load_snapshot
+        try:return jsonify(load_snapshot(output/'paper_contest_20261113_20261119'))
+        except FileNotFoundError:return jsonify(error='尚未建立独立模拟账本；不会使用实盘配置代替。'),404
+        except (ValueError,KeyError,TypeError,OverflowError):return jsonify(error='模拟账本校验未通过，暂不展示。'),409
+
+    @app.route('/api/paper-contest/refresh',methods=['POST'])
+    def refresh_paper_contest():
+        from paper_runtime import refresh_store
+        from paper_view import load_snapshot
+        store=output/'paper_contest_20261113_20261119'
+        result=refresh_store(store)
+        if result['status']=='missing':return jsonify(error=result['message']),404
+        try:return jsonify(snapshot=load_snapshot(store),refresh=result)
+        except (ValueError,KeyError,TypeError,OverflowError):return jsonify(error='模拟账本校验未通过，暂不展示。'),409
+
     @app.route('/api/session')
     def session_token():
         # Same-origin JSON only. No CORS: third-party pages cannot read tokens.

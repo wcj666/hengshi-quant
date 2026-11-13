@@ -1,0 +1,20 @@
+#!/bin/sh
+set -eu
+
+branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || exit 0)
+[ "$branch" = "main" ] || exit 0
+
+# Keep personal account files out of every automatic push.
+if git ls-files --error-unmatch config.json >/dev/null 2>&1; then
+  echo "Refusing automatic push because config.json is tracked." >&2
+  exit 1
+fi
+if git ls-files -- 'output/**' | grep -q .; then
+  echo "Refusing automatic push because output/ is tracked." >&2
+  exit 1
+fi
+
+remote=$(git config --get "branch.$branch.remote" || printf '%s' origin)
+upstream=$(git config --get "branch.$branch.merge" || printf 'refs/heads/main')
+upstream=${upstream#refs/heads/}
+GIT_TERMINAL_PROMPT=0 git push "$remote" "HEAD:$upstream"
