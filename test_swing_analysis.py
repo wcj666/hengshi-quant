@@ -58,7 +58,7 @@ assert run(tech=tech,chan=chan)['action'] in ('wait','buy')
 assert all(p['confirmed_on']<=chan['asof'] for p in chan['recent_points'])
 # Read-only HTTP route with a synthetic history and quote; no live data required.
 from unittest.mock import patch
-with patch('web_dashboard.history_by_asset',return_value=x),patch('web_dashboard.snapshot_selected_akshare',return_value=({},[])):
+with patch('web_dashboard.load_config',return_value=cfg),patch('web_dashboard.history_by_asset',return_value=x),patch('web_dashboard.snapshot_selected_akshare',return_value=({},[])):
  response=create_app().test_client().get('/api/analyze/301313',headers={'Host':'127.0.0.1:8765'})
  assert response.status_code==200,response.data
  assert response.json['swing']['horizon']=='1～2周 / 5～10个交易日'

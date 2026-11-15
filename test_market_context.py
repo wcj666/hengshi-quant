@@ -3,8 +3,10 @@ from __future__ import annotations
 import datetime as dt
 import pandas as pd
 from zoneinfo import ZoneInfo
+from unittest.mock import patch
 from market_context import current_auction_phase, parse_auction, parse_global, match_index
 from intraday_monitor import single_cycle
+from portfolio_test_fixture import account_fixture
 
 CST=ZoneInfo('Asia/Shanghai')
 
@@ -42,6 +44,7 @@ assert match_index('纳斯达克100指数','NDX') is None
 assert match_index('韩国KOSPI200','KOSPI200') is None
 
 # No stale prior-day auction data can trigger risk alarms in demonstration mode.
-state=single_cycle(mode='demo',interval=180)
+with patch('intraday_monitor.load_config',side_effect=lambda _: account_fixture()), patch('intraday_monitor.store_json'):
+    state=single_cycle(mode='demo',interval=180)
 assert state['mode']=='demo' and not state.get('notifications_attempted')
 print('PASS: auction schedule, date/stale exclusion, global timezone, missing indices, demo safety')

@@ -87,15 +87,23 @@ def validate_settings(body):
     return out
 
 
-def calendar_dates(output):
+def calendar_dates(output, now=None):
     cache=read(Path(output)/'strategy_calendar.json')
     ds=cache.get('dates',[])
     if not cache.get('verified') or not isinstance(ds,list):return []
     try:
         ds=sorted(set(str(date.fromisoformat(x)) for x in ds))
-        if not ds or ds[-1]<str(datetime.now(CST).date()):return []
+        if not ds or ds[-1]<str((now or datetime.now(CST)).date()):return []
     except (TypeError,ValueError):return []
     return ds
+
+
+def latest_completed_day(output, now=None):
+    clock = (now or datetime.now(CST)).astimezone(CST)
+    today = clock.date().isoformat()
+    include_today = clock.hour * 60 + clock.minute >= 905
+    return next((day for day in reversed(calendar_dates(output, clock))
+                 if day < today or (day == today and include_today)), None)
 
 
 def _account_view(output,cfg,account,now):
@@ -284,9 +292,7 @@ def refresh_evidence(output,cfg,code=None):
             ds=sorted(set(str(x)[:10] for x in dates))
             if today<=ds[-1]:write(output/'strategy_calendar.json',{'verified':True,'dates':ds,'fetched_at':clock.isoformat()})
         except Exception as exc:errors.append('交易日历：'+type(exc).__name__)
-    ds=calendar_dates(output)
-    completed=[d for d in ds if d<=today and (d<today or clock.hour*60+clock.minute>=905)]
-    expected=completed[-1] if completed else None
+    expected=latest_completed_day(output, clock)
     refresh_errors={}
     def store_evidence(c,frame):
         rows=_frame_records(frame)

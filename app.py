@@ -75,15 +75,19 @@ def snapshot_akshare(cfg=None):
     return result,errors
 
 
-def stock_history(code, begin):
+def stock_history(code, begin, end=None):
+    end=end or date.today().strftime('%Y%m%d')
     try:
         from asset_history import tencent_history
-        return tencent_history(code, 'stock', begin, date.today().strftime('%Y%m%d'))
+        return tencent_history(code,'stock',begin,end)
     except Exception:
-        pass
+        return eastmoney_stock_history(code,begin,end)
+
+
+def eastmoney_stock_history(code,begin,end=None):
     import akshare as ak
     df=ak.stock_zh_a_hist(symbol=code, period='daily', start_date=begin,
-                          end_date=date.today().strftime('%Y%m%d'), adjust='qfq')
+                          end_date=end or date.today().strftime('%Y%m%d'), adjust='qfq')
     cols={'日期':'date','开盘':'open','收盘':'close','最高':'high','最低':'low','成交量':'volume'}
     if df.empty or any(k not in df for k in ('日期','收盘','最高','最低','成交量')):
         raise ValueError('日线为空或缺少真实最高/最低价字段')
@@ -92,7 +96,9 @@ def stock_history(code, begin):
     for x in ('open','close','high','low','volume'):
         if x in df:
             df[x]=pd.to_numeric(df[x],errors='coerce')
-    return df.dropna(subset=['date','close','high','low','volume']).sort_values('date')
+    df=df.dropna(subset=['date','close','high','low','volume']).sort_values('date')
+    df.attrs.update(source='东方财富日K',adjust='qfq')
+    return df
 
 
 def score_stock(code,name,df):
@@ -231,7 +237,7 @@ def main():
     cfg=load_config(args.config)
     quotes={};errors=[]
     if args.mode=='live':
-        quotes,errors=snapshot_akshare()
+        quotes,errors=snapshot_akshare(cfg)
     scan_df,scan_errors=scan(cfg,args.mode)
     errors+=scan_errors
     port_df,missing,equity,loss,remain=portfolio(cfg,quotes,args.mode)

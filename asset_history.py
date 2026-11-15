@@ -132,8 +132,8 @@ def history_by_asset(code:str,asset_type:str,begin:str,end:str|None=None):
         except Exception as primary_error:
             try:
                 if asset_type=='stock':
-                    from app import stock_history
-                    return _norm(stock_history(code,begin))
+                    from app import eastmoney_stock_history
+                    return _norm(eastmoney_stock_history(code,begin,end))
                 import akshare as ak
                 return _norm(ak.fund_etf_hist_em(symbol=code,period='daily',start_date=begin,end_date=end,adjust=''))
             except Exception as fallback_error:

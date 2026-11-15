@@ -149,8 +149,8 @@ def snapshot_selected_tencent(cfg, *, include_watch=True, deadline_seconds=7.5):
         return {}, errors + [f'腾讯批量行情失败：{type(exc).__name__}: {exc}']
 
 
-def tencent_full_snapshot(*, deadline_seconds=45.0):
-    """Fetch a broad A-share snapshot from Tencent for full-market fallback.
+def tencent_full_snapshot(*, deadline_seconds=45.0, expected_day=None):
+    """Fetch Shanghai and Shenzhen A-share quote batches for scan fallback.
 
     Tencent does not publish industry labels or a reliable volume-ratio field
     in this endpoint. Those fields stay empty so the scanner cannot invent them.
@@ -159,7 +159,7 @@ def tencent_full_snapshot(*, deadline_seconds=45.0):
     if not 5 <= deadline_seconds <= 180:
         raise ValueError('全市场腾讯查询截止时间必须在5—180秒之间')
     codes=[*(f'{x:06d}' for x in range(1,4000)),
-           *(f'{x:06d}' for x in range(300000,301000)),
+           *(f'{x:06d}' for x in range(300000,302000)),
            *(f'{x:06d}' for x in range(600000,606000)),
            *(f'{x:06d}' for x in range(688000,689000))]
     symbols=[_tencent_symbol(c) for c in codes]
@@ -172,20 +172,28 @@ def tencent_full_snapshot(*, deadline_seconds=45.0):
         response.raise_for_status()
         return response.content.decode('gb18030','replace')
 
-    rows=[];errors=[]
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        futures=[pool.submit(fetch,chunk) for chunk in chunks]
+    rows=[];errors=[];invalid_dates=0
+    now_cn=started.astimezone(ZoneInfo('Asia/Shanghai'))
+    pool=ThreadPoolExecutor(max_workers=4)
+    try:
+        futures={pool.submit(fetch,chunk):set(chunk) for chunk in chunks}
         finished,_=wait(futures,timeout=deadline_seconds)
-        for future in futures:
+        for future,requested in futures.items():
             if future not in finished:
                 errors.append('腾讯全市场批次超时');continue
             try:
                 text=future.result()
                 for symbol,body in re.findall(r'v_((?:sh|sz)\d{6})\s*=\s*"([^"\r\n]*)"\s*;',text):
                     fields=body.split('~')
-                    if len(fields)<39 or not re.fullmatch(r'\d{6}',fields[2]):continue
+                    if len(fields)<39 or symbol not in requested or fields[2]!=symbol[2:]:continue
                     current=_price(fields[3]);previous=_price(fields[4])
                     if current is None or previous is None:continue
+                    try:
+                        stamp=datetime.strptime(fields[30],'%Y%m%d%H%M%S').replace(tzinfo=now_cn.tzinfo)
+                    except ValueError:
+                        invalid_dates+=1;continue
+                    if stamp>now_cn or (expected_day and stamp.date().isoformat()!=expected_day):
+                        invalid_dates+=1;continue
                     amount=None
                     if len(fields)>35:
                         pieces=fields[35].split('/')
@@ -193,14 +201,25 @@ def tencent_full_snapshot(*, deadline_seconds=45.0):
                     market_cap=_price(fields[72]) if len(fields)>72 else None
                     turnover=_price(fields[38]) if len(fields)>38 else None
                     rows.append({'code':fields[2],'name':fields[1],'price':current,
-                        'pct':round((current/previous-1)*100,4),'amount':amount or 0.0,
-                        'turnover':turnover if turnover is not None else 0.0,
-                        'volume_ratio':None,'market_cap':market_cap or 0.0})
+                        'pct':round((current/previous-1)*100,4),'amount':amount,
+                        'turnover':0.0 if fields[38] in ('0','0.00') else turnover,
+                        'volume_ratio':None,'market_cap':market_cap,
+                        'source_timestamp':stamp.isoformat()})
             except Exception as exc:errors.append(f'腾讯批次失败：{type(exc).__name__}: {exc}')
-    if not rows:raise RuntimeError('腾讯全市场行情没有返回有效股票')
+    finally:
+        pool.shutdown(wait=False,cancel_futures=True)
+    if invalid_dates:
+        errors.append(f'已排除 {invalid_dates} 条日期不符或时间无效的腾讯行情')
+    if not rows:
+        raise RuntimeError('腾讯未返回有效沪深行情'+('（'+'；'.join(errors[:3])+'）' if errors else ''))
     frame=pd.DataFrame(rows).drop_duplicates('code').reset_index(drop=True)
+    for key in ('amount','turnover','market_cap','volume_ratio'):
+        frame[key]=pd.to_numeric(frame[key],errors='coerce')
     elapsed=(datetime.now(timezone.utc)-started).total_seconds()
-    return frame, f'腾讯公开行情 qt.gtimg.cn，全市场批次耗时{elapsed:.1f}秒（行业和量比字段未提供）', errors
+    scope=f'腾讯沪深备选快照，收到 {len(frame)} 只有效报价，耗时 {elapsed:.1f} 秒'
+    if len(finished)!=len(futures) or any('批次失败' in error for error in errors):
+        scope+='，部分批次缺失'
+    return frame, scope+'；行业和量比待补', errors
 
 
 def _stock_quote(ak, code):

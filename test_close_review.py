@@ -1,6 +1,10 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from close_review import build_close_review
+from web_dashboard import create_app
 
 
 class CloseReviewTests(unittest.TestCase):
@@ -77,6 +81,23 @@ class CloseReviewTests(unittest.TestCase):
         policy = result["cash_policy"]
         self.assertGreaterEqual(policy["cash_after_all_planned_sales"], policy["cash_after_planned_sales"])
         self.assertIn("available_after_all_planned_sales", policy)
+
+    def test_previous_day_quote_blocks_close_review_quantities_and_budget(self):
+        feed = {}
+        for position in self.snapshot["positions"]:
+            code = position["code"]
+            quote = self.quotes[code]
+            stamp = "2026-11-12T07:00:00+00:00" if code == "600001" else quote["source_timestamp"]
+            feed[(position["type"], code)] = (quote["price"], position["name"], quote["previous_close"], stamp)
+        with TemporaryDirectory() as folder, patch("web_dashboard.load_config", return_value=self.config), \
+                patch("web_dashboard.latest_broker_snapshot", return_value=self.snapshot), \
+                patch("web_dashboard.strategy.latest_completed_day", return_value="2026-11-13"), \
+                patch("web_dashboard.snapshot_selected_tencent", return_value=(feed, [])):
+            client = create_app(Path(folder)).test_client()
+            result = client.get("/api/close-review").get_json()
+        self.assertFalse(result["data_verified"])
+        self.assertEqual(result["sell_plan"], [])
+        self.assertIsNone(result["cash_policy"]["minimum_reserve"])
 
 
 if __name__ == "__main__":

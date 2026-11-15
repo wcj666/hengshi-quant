@@ -85,13 +85,13 @@ class TencentDailyTests(unittest.TestCase):
 
     def test_tencent_primary_avoids_rate_limited_eastmoney(self):
         wanted=parse(payload())
-        with patch.object(history,'tencent_history',return_value=wanted),patch('app.stock_history',side_effect=AssertionError('unneeded Eastmoney')):
+        with patch.object(history,'tencent_history',return_value=wanted),patch('app.eastmoney_stock_history',side_effect=AssertionError('unneeded Eastmoney')):
             self.assertIs(history.history_by_asset('300274','stock','20260101'),wanted)
 
     def test_stock_and_benchmark_fallback_remain_real_provider_data(self):
         wanted=parse(payload())
         with (patch.object(history,'tencent_history',side_effect=ValueError('no verified qfq')),
-              patch('app.stock_history',return_value=wanted)):
+              patch('app.eastmoney_stock_history',return_value=wanted)):
             self.assertEqual(history.history_by_asset('300274','stock','20260101').iloc[-1].close,78.26)
         with (patch.object(history,'tencent_history',side_effect=ValueError('failure')),
               patch('akshare.index_zh_a_hist',return_value=wanted) as fallback):

@@ -37,6 +37,25 @@ if(!$('daily-pnl').textContent.includes('800.00'))throw Error('daily PnL disappe
 if(!$('sizing-table').innerHTML.includes('暂停新增'))throw Error('new entry must remain blocked');
 ''')
 
+    def test_scan_refreshes_results_even_when_started_from_an_idle_page(self):
+        self.run_js(r'''
+STORE={job:{running:false},meta:{mode:'live'},top:[],candidates:[]};
+const calls=[];
+api=async(path)=>{
+ calls.push(path);
+ if(path==='/api/scan')return {job:{running:true}};
+ return {running:false,returncode:0,message:'已生成新报告'};
+};
+refresh=async()=>{calls.push('refresh');return true;};
+(async()=>{
+ await scan('live');
+ while(scanPolling)await Promise.resolve();
+ if(calls.join()!=='/api/scan,/api/job,refresh')throw Error('scan did not poll and refresh');
+ if($('live-scan').disabled)throw Error('scan button not restored');
+ if(!$('job-message').textContent.includes('已生成新报告'))throw Error('completion not shown');
+})();
+''')
+
     def test_budget_resume_is_explicit_and_only_shown_for_latched_accounts(self):
         self.run_js(r'''
 const fields={};for(const key of Object.keys(STRATEGY_DEFAULTS))fields[key]={value:''};

@@ -135,8 +135,12 @@ def import_previous_config():
                 return f'已导入旧版配置：{best}；请在网页检查持仓/现金是否最新'
         except (OSError, ValueError):
             pass
-    shutil.copy2(SOURCE / 'config.json', cfg)
-    return '采用随包初始配置（仅为历史示例，请核对）'
+    supplied = SOURCE / 'config.json'
+    if supplied.is_file():
+        shutil.copy2(supplied, cfg)
+        return '已采用来源目录的配置，请核对持仓与现金'
+    shutil.copy2(SOURCE / 'config.example.json', cfg)
+    return '已安装示例配置，请填写实际持仓与现金'
 
 
 def backup_current_config():
@@ -268,24 +272,9 @@ def install():
         stop_agent(label, remove=True)
     release_owned_listener()
     # Copy code first, but do not overwrite the user's persistent config/output.
-    old_config = APP / 'config.json'
-    if not old_config.exists():
-        # Keep initial config until we try to import an existing v3.x file.
-        cfg_src = SOURCE / 'config.json'
-        # Temporarily avoid copying default config so we can prefer a prior user-edited one.
-        if cfg_src.exists():
-            default = cfg_src.read_bytes()
-            copy_sources()
-            (APP / 'config.json').unlink(missing_ok=True)
-            if not (APP / 'config.json').exists():
-                message = import_previous_config()
-            else:
-                message = '保留现有持仓配置'
-        else:
-            raise RuntimeError('缺少原始 config.json')
-    else:
-        copy_sources()
-        message = '已保留已安装版本的持仓、自选与止盈止损配置'
+    APP.mkdir(parents=True, exist_ok=True)
+    message = import_previous_config()
+    copy_sources()
     print(message)
     python = build_env()
     hour, minute = schedule_local_time()

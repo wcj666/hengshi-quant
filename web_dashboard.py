@@ -291,8 +291,12 @@ def create_app(folder:Path=ROOT):
                 if prev is not None: previous_closes[item['代码']]=prev
             except (TypeError, ValueError, KeyError):
                 pass
-        risk=compute(cfg,quotes,fresh=fresh,watch_quotes=watches,previous_closes=previous_closes,
-                     strategy_account=strategy.get_account(output,cfg))
+        # The scan is a research snapshot. Only the intraday monitor validates
+        # the market session and the source time needed for new-entry sizing.
+        account_context={**strategy.get_account(output,cfg),'verified':False}
+        risk=compute(cfg,quotes,fresh=fresh,previous_closes=previous_closes,
+                     strategy_account=account_context)
+        risk['available_new_risk']=None
         # Sizing needs a valid account state, plus current quote for that particular watch.
         result={'config':cfg,'watchlist':watches,'risk':risk,'meta':metadata,
                 'exit_suggestions':exit_suggestions(cfg),
@@ -300,11 +304,12 @@ def create_app(folder:Path=ROOT):
                 'broker_snapshot':latest_broker_snapshot(output,cfg),
                 'fresh':fresh,'fresh_reason':reason,'minutes_old':round(minutes_old,1) if minutes_old is not None else None,
                 'scan_ok':scan_ok,'scan_failure':metadata.get('failure'),
+                'latest_completed_day':strategy.latest_completed_day(output),
                 'top':safe_csv(output/'verified_top.csv',30) if scan_ok else [],
                 'candidates':safe_csv(output/'market_candidates.csv',30) if scan_ok else [],
                 'sectors':safe_csv(output/'sector_rank.csv',25) if scan_ok else [],
                 'alerts':safe_csv(output/'alerts.csv',50) if scan_ok else [],
-                'job':dict(JOB)}
+                'job':scan_job_state()}
         return jsonify(result)
 
     @app.route('/api/intraday')
@@ -518,6 +523,10 @@ def create_app(folder:Path=ROOT):
             meta=json.loads((output/'run_meta.json').read_text(encoding='utf-8'))
             out_mode=meta.get('mode','demo')
         except (OSError, ValueError):meta={}
+        if meta.get('scan_ok') is False:
+            reason=meta.get('failure') or '扫描失败'
+            return jsonify(shortlist=[],count=0,status=reason,mode=out_mode,asof=None,stale=True,
+                           blockers=[reason],source_errors=[reason],excluded=cfg.get('daily_excludes',[]))
         path=output/('daily_observe_demo.json' if out_mode=='demo' else 'daily_observe.json')
         try:
             data=json.loads(path.read_text(encoding='utf-8'))
@@ -527,13 +536,11 @@ def create_app(folder:Path=ROOT):
             return jsonify(shortlist=[],count=0,status='V1已启用，等待按固定3日回调转强规则重新扫描',mode=out_mode,
                            asof=None,stale=True,strategy_version='1.0',excluded=cfg.get('daily_excludes',[]),
                            disclaimer='旧版评分榜不作为V1候选；不凑足5只。')
-        today=datetime.now(ZoneInfo('Asia/Shanghai')).date()
-        try:
-            asof=datetime.strptime(data['asof'],'%Y-%m-%d').date()
-            day_gap=(today-asof).days
-        except (KeyError,TypeError,ValueError):
-            day_gap=100
-        stale=bool(day_gap<0 or day_gap>4 or data.get('mode')!='live')
+        expected=strategy.latest_completed_day(output)
+        asof=data.get('asof')
+        if not asof and not data.get('shortlist') and meta.get('scan_ok') is True:
+            asof=meta.get('verified_asof')
+        stale=not expected or asof!=expected or data.get('mode')!='live'
         excluded={str(x).zfill(6) for x in cfg.get('daily_excludes',[])}
         rows=[x.copy() for x in data.get('shortlist',[]) if x.get('code') not in excluded]
         user_codes={code_str(x['code']) for x in cfg.get('watchlist',[])}
@@ -542,31 +549,12 @@ def create_app(folder:Path=ROOT):
             item['can_buy_now']=False
             item['max_buy_shares']=None
             item['risk_note']='历史日线候选；不等于实时买入信号'
-        # Only a truly recent *live* snapshot with an unchanged account ledger can
-        # contribute an indicative risk allocation. It is not an executable order.
-        meta_dt=None
-        try:meta_dt=datetime.fromisoformat(meta['generated_at'])
-        except (KeyError,ValueError,TypeError):pass
-        recent=bool(meta_dt and meta_dt.tzinfo and
-                    0<=(datetime.now(timezone.utc)-meta_dt.astimezone(timezone.utc)).total_seconds()<1200)
-        if not strategy.enabled(cfg) and recent and not stale and meta.get('mode')=='live' and meta.get('config_hash')==json_hash(cfg):
-            pdata=safe_csv(output/'portfolio.csv',500)
-            quotes={}
-            for item in pdata:
-                try:
-                    price=float(item['当前快照价'])
-                    if price>0 and math.isfinite(price):quotes[item['代码']]=price
-                except (ValueError,TypeError,KeyError):pass
-            sized=compute(cfg,quotes,fresh=True,watch_quotes=[{'code':x['code'],'name':x['name'],'price':x['close']} for x in rows])
-            for item,entry in zip(rows,sized.get('sizing',[])):
-                item['max_buy_shares']=entry.get('max_buy_shares')
-                item['risk_note']='仅按最近快照与历史收盘参考价模拟：'+entry.get('reason','')
         status=('演示合成数据，禁止交易' if out_mode=='demo' else
                 '最近交易日日线技术观察，非实时买入推荐' if not stale else
                 '数据已过期或日期不一致，暂停作为今日候选')
         if strategy.enabled(cfg):status=(data.get('status','V1固定形态观察，须准备次日计划并人工核验')+
                                        ('；数据日期未核验/已过期，不可作为今日候选' if stale else ''))
-        return jsonify(mode=out_mode,asof=data.get('asof'),generated_at=data.get('generated_at'),
+        return jsonify(mode=out_mode,asof=asof,generated_at=data.get('generated_at'),
                        count=len(rows),shortlist=rows,stale=stale,status=status,
                        excluded=sorted(excluded),disclaimer=data.get('disclaimer','仅供研究，非自动下单'),
                        strategy_version=data.get('strategy_version'),blockers=data.get('blockers',[]),source_errors=data.get('source_errors',[]))
@@ -581,23 +569,33 @@ def create_app(folder:Path=ROOT):
         with WRITE_LOCK:
             cfg = config()
         snapshot = latest_broker_snapshot(output, cfg)
+        clock = datetime.now(strategy.CST)
+        expected = strategy.latest_completed_day(output, clock)
         quote_cfg = {'positions': (snapshot or {}).get('positions') or cfg.get('positions', [])}
         feed, errors = snapshot_selected_tencent(quote_cfg, include_watch=False, deadline_seconds=7.5)
         quotes = {}
         for (kind, code), quote in feed.items():
             quotes[code] = {'price': quote[0], 'name': quote[1], 'previous_close': quote[2],
                             'source_timestamp': quote[3]}
+        daily = strategy.read(output/'daily_observe.json')
+        scan_meta = strategy.read(output/'run_meta.json')
         candidates = []
-        try:
-            daily = json.loads((output / 'daily_observe.json').read_text(encoding='utf-8'))
-            if daily.get('mode') == 'live' and isinstance(daily.get('shortlist'), list):
-                candidates = daily['shortlist']
-        except (OSError, ValueError, TypeError):
-            pass
+        if expected and daily.get('mode')=='live' and daily.get('asof')==expected and scan_meta.get('scan_ok', True):
+            candidates = [row for row in daily.get('shortlist', []) if row.get('asof')==expected]
         complete_codes = {str(x.get('code')).zfill(6) for x in (snapshot or {}).get('positions', [])}
-        data_verified = bool(snapshot and not errors and complete_codes.issubset(quotes))
-        stamps = [quotes[code].get('source_timestamp') for code in complete_codes if code in quotes]
-        asof = max(stamps) if stamps else datetime.now(ZoneInfo('Asia/Shanghai')).isoformat(timespec='seconds')
+        def closing_stamp(value):
+            stamp=parse_provider_time(value)
+            return stamp.astimezone(strategy.CST) if stamp is not None else None
+        def matches_close(stamp):
+            return bool(stamp and stamp<=clock and stamp.date().isoformat()==expected and stamp.hour>=15)
+        account_stamp=closing_stamp((snapshot or {}).get('asof'))
+        stamps=[closing_stamp(quotes.get(code,{}).get('source_timestamp')) for code in sorted(complete_codes)]
+        if not expected:errors.append('尚未核验最近完整交易日')
+        if not matches_close(account_stamp):errors.append('券商快照未覆盖最近收盘，请更新持仓和现金')
+        if not all(matches_close(stamp) for stamp in stamps):errors.append('部分证券缺少最近交易日的收盘报价')
+        data_verified = bool(snapshot and expected and not errors)
+        known_stamps=[stamp for stamp in stamps if stamp is not None]
+        asof = min(known_stamps).isoformat() if known_stamps else None
         return jsonify(build_close_review(cfg, snapshot, quotes, candidates,
                                           asof=asof, data_verified=data_verified,
                                           quote_errors=errors))
@@ -758,28 +756,28 @@ def create_app(folder:Path=ROOT):
             save_config(cfg)
         return jsonify(ok=True,message='已从本地台账移除。请更新现金，否则账户净值会错误。')
 
+    def scan_job_state():
+        with JOB_LOCK:
+            return dict(JOB)
+
     def run_scan(mode,top):
-        with JOB_LOCK:JOB.update(running=True,started=datetime.now().astimezone().isoformat(timespec='seconds'),finished=None,returncode=None,message='扫描进行中…')
         try:
             args=[sys.executable,str(folder/'phase2.py'),'--mode',mode,'--top',str(top)]
             result=subprocess.run(args,cwd=str(folder),capture_output=True,text=True,timeout=1800)
-            msg=((result.stdout or '')+'\n'+(result.stderr or ''))[-3500:]
-            if result.returncode != 0:
-                failure={'mode':mode,'generated_at':datetime.now().astimezone().isoformat(timespec='seconds'),
-                         'scan_ok':False,'failure':msg or '扫描失败','universe_count':0,
-                         'verified_count':0,'daily_observe_count':0,'daily_observe_asof':None,
-                         'errors_count':1,'quote_time_verified':False}
-                tmp=output/'run_meta.json.tmp'
-                tmp.write_text(json.dumps(failure,ensure_ascii=False,indent=2),encoding='utf-8')
-                tmp.replace(output/'run_meta.json')
-                for name in ('market_candidates.csv','verified_top.csv','sector_rank.csv','alerts.csv','portfolio.csv','report_v2.html'):
-                    try:(output/name).unlink()
-                    except FileNotFoundError:pass
-            with JOB_LOCK:
-                JOB.update(running=False,finished=datetime.now().astimezone().isoformat(timespec='seconds'),
-                           returncode=result.returncode,message=msg or '扫描完成')
+            code=result.returncode
+            msg=((result.stderr if code else result.stdout) or '').strip()[-1200:]
         except Exception as e:
-            with JOB_LOCK:JOB.update(running=False,finished=datetime.now().astimezone().isoformat(timespec='seconds'),returncode=-1,message=str(e))
+            code=-1
+            msg='扫描超时，请重试' if isinstance(e,subprocess.TimeoutExpired) else '无法启动扫描：'+str(e)
+        if code not in (0,2,75):
+            from phase2 import record_scan_failure
+            try:
+                record_scan_failure(output,mode,msg or '扫描失败')
+            except OSError:
+                app.logger.exception('无法保存扫描失败状态')
+        with JOB_LOCK:
+            JOB.update(running=False,finished=datetime.now(strategy.CST).isoformat(timespec='seconds'),
+                       returncode=code,message=msg or ('扫描失败' if code else '扫描完成'))
 
     @app.route('/api/scan',methods=['POST'])
     def start_scan():
@@ -789,12 +787,14 @@ def create_app(folder:Path=ROOT):
         top=clean_number(body.get('top',30),1,150,integer=True)
         with JOB_LOCK:
             if JOB['running']:return jsonify(error='已有一个扫描正在运行'),409
-            JOB['running']=True
+            JOB.update(running=True,started=datetime.now(strategy.CST).isoformat(timespec='seconds'),
+                       finished=None,returncode=None,message='扫描进行中…')
+            queued=dict(JOB)
         threading.Thread(target=run_scan,args=(mode,top),daemon=True).start()
-        return jsonify(ok=True,message='扫描任务已启动，网页会持续刷新状态')
+        return jsonify(ok=True,message='扫描任务已启动，网页会持续刷新状态',job=queued)
 
     @app.route('/api/job')
-    def job_state():return jsonify(dict(JOB))
+    def job_state():return jsonify(scan_job_state())
 
     @app.route('/api/analyze/<code>')
     def analyze(code):
@@ -877,6 +877,8 @@ def create_app(folder:Path=ROOT):
 
     @app.route('/report')
     def report():
+        meta=strategy.read(output/'run_meta.json')
+        if meta.get('scan_ok') is False:return '本次扫描未完成，请在筛选页面查看失败原因。',503
         path=output/'report_v2.html'
         if not path.is_file():return '尚未生成报告；请先运行扫描。',404
         return send_file(path, mimetype='text/html')

@@ -1,7 +1,7 @@
 """A股全市场快照初筛、板块强度、信号报警；非自动下单。
 公开行情接口可能延迟或变更；不保证实时。"""
 from __future__ import annotations
-import argparse, json, html, sys, time, hashlib
+import argparse, fcntl, json, html, sys, time, hashlib
 from datetime import datetime
 from pathlib import Path
 import pandas as pd
@@ -13,12 +13,13 @@ from trade_levels import make_levels
 from chan_analysis import analyze_chan
 from daily_observe import select_five
 from strategy_v1 import enabled as strategy_enabled
+from strategy_runtime import CST, calendar_dates, latest_completed_day, write
 
 FIELDS = {'代码':'code','名称':'name','最新价':'price','涨跌幅':'pct','成交额':'amount','换手率':'turnover','量比':'volume_ratio', '总市值':'market_cap'}
 SECTOR_FIELDS={'板块名称':'name','涨跌幅':'pct','上涨家数':'up','下跌家数':'down','领涨股票':'leader','领涨股票-涨跌幅':'leader_pct','总市值':'market_cap'}
 
 
-def full_snapshot(mode):
+def full_snapshot(mode, *, expected_quote_day=None):
     if mode=='demo':
         rng=np.random.default_rng(20261106)
         names=['国电南瑞','东方电子','中国西电','牧原股份','阳光电源','润建股份','公元股份','东方嘉盛']
@@ -32,18 +33,24 @@ def full_snapshot(mode):
         raw=ak.stock_zh_a_spot_em()
         required=['代码','名称','最新价','涨跌幅','成交额','换手率','量比']
         missing=[x for x in required if x not in raw.columns]
-        if missing:raise RuntimeError('全市场快照接口字段缺失: '+','.join(missing))
+        if missing or raw.empty:raise RuntimeError('全市场快照为空或字段缺失: '+','.join(missing))
         frame=raw.rename(columns=FIELDS).copy()
         for key in ('price','pct','amount','turnover','volume_ratio','market_cap'):
             if key in frame:frame[key]=pd.to_numeric(frame[key], errors='coerce')
         frame['code']=frame['code'].astype(str).str.zfill(6)
+        if not ((frame.price>0)&(frame.amount>0)).any():
+            raise ValueError('东方财富未返回有效价格和成交额')
         return frame,'AKShare stock_zh_a_spot_em，时间戳未由交易所核验'
     except Exception as primary_error:
-        frame,source,errors=tencent_full_snapshot()
+        try:
+            frame,source,errors=tencent_full_snapshot(expected_day=expected_quote_day)
+        except Exception as fallback_error:
+            raise RuntimeError(f'东方财富行情失败（{type(primary_error).__name__}），腾讯回退失败（{fallback_error}）') from fallback_error
+        frame.attrs['source_errors']=errors
         return frame,source+'；东方财富失败：'+type(primary_error).__name__
 
 
-def sector_snapshot(mode):
+def sector_snapshot(mode, *, use_eastmoney=True):
     if mode=='demo':
         rng=np.random.default_rng(7)
         data=[]
@@ -51,9 +58,17 @@ def sector_snapshot(mode):
             up=int(rng.integers(5,55)); down=int(rng.integers(4,45))
             data.append({'name':name,'pct':round(float(rng.normal(1,2)),2),'up':up,'down':down,'leader':'演示龙头','leader_pct':round(float(rng.uniform(1,9)),2)})
         return pd.DataFrame(data),'演示合成数据'
-    # Tencent's public quote endpoint has no sector classification. Keep the
-    # section explicit and empty instead of calling a second rate-limited source.
-    return pd.DataFrame(columns=list(SECTOR_FIELDS.values())), '腾讯行情未提供行业分类，行业榜待补'
+    # Skip another Eastmoney call after the primary snapshot already failed.
+    if not use_eastmoney:
+        return pd.DataFrame(columns=list(SECTOR_FIELDS.values())), '腾讯快照未提供行业分类，本次暂无行业榜'
+    import akshare as ak
+    raw=ak.stock_board_industry_name_em()
+    if raw.empty or not {'板块名称','涨跌幅'}.issubset(raw.columns):
+        raise ValueError('东方财富行业榜为空或字段缺失')
+    frame=raw.rename(columns=SECTOR_FIELDS)
+    for key in ('pct','up','down','leader_pct'):
+        if key in frame:frame[key]=pd.to_numeric(frame[key],errors='coerce')
+    return frame,'行业来源：东方财富'
 
 
 def filter_universe(df, top_n,cfg=None):
@@ -104,7 +119,7 @@ def v1_benchmark_history(mode):
         return pd.DataFrame(),'沪深300完整日线不可用：'+type(exc).__name__
 
 
-def _verify_v1_candidates(candidates,mode,max_calls,pause,cfg,benchmark_hist=None):
+def _verify_v1_candidates(candidates,mode,max_calls,pause,cfg,benchmark_hist=None,*,expected_day=None):
     from strategy_setup import build_setup,completed_history
     rows=[];errors=[]
     if benchmark_hist is None:
@@ -119,12 +134,15 @@ def _verify_v1_candidates(candidates,mode,max_calls,pause,cfg,benchmark_hist=Non
         if not code.startswith(('00','60')):continue
         try:
             hist=stock_history(code,begin).rename(columns={'成交额':'amount'})
-            setup=build_setup(hist,benchmark_hist,asset_type='stock',name=str(snapshot['name']))
             complete,error=completed_history(hist,amount=True)
             if error or complete is None or complete.empty:raise ValueError(error or '完整日线为空')
             latest=complete.iloc[-1];prior=complete.iloc[-2] if len(complete)>1 else latest
+            if expected_day and str(latest.date)!=expected_day:
+                raise ValueError(f'日线仅到{latest.date}，本次应复核{expected_day}')
+            setup=build_setup(hist,benchmark_hist,asset_type='stock',name=str(snapshot['name']))
             levels=setup.get('levels',{})
             rows.append({'日期':str(latest.date),'股票代码':code,'股票名称':str(snapshot['name']),
+                         '日线来源':hist.attrs.get('source','来源未标注'),
                          '收盘':float(latest.close),'涨跌幅%':round((float(latest.close)/float(prior.close)-1)*100,2),
                          '初筛分':snapshot.get('初筛分',0),'V1形态通过':setup.get('eligible') is True,
                          'V1形态证据':json.dumps(setup,ensure_ascii=False,allow_nan=False),
@@ -139,8 +157,8 @@ def _verify_v1_candidates(candidates,mode,max_calls,pause,cfg,benchmark_hist=Non
     return pd.DataFrame(rows),errors
 
 
-def verify_candidates(candidates,mode, max_calls, pause, cfg,benchmark_hist=None):
-    if strategy_enabled(cfg):return _verify_v1_candidates(candidates,mode,max_calls,pause,cfg,benchmark_hist)
+def verify_candidates(candidates,mode,max_calls,pause,cfg,benchmark_hist=None,*,expected_day=None):
+    if strategy_enabled(cfg):return _verify_v1_candidates(candidates,mode,max_calls,pause,cfg,benchmark_hist,expected_day=expected_day)
     rows=[];errors=[]
     begin=(pd.Timestamp.today()-pd.Timedelta(days=125)).strftime('%Y%m%d')
     for i,(_,s) in enumerate(candidates.head(max_calls).iterrows()):
@@ -159,6 +177,9 @@ def verify_candidates(candidates,mode, max_calls, pause, cfg,benchmark_hist=None
                     if not hist.empty and str(hist.iloc[-1]['date'].date())==today:
                         hist=hist.iloc[:-1].copy()
             item=score_stock(code,str(s['name']),hist)
+            if expected_day and item['日期']!=expected_day:
+                raise ValueError(f"日线仅到{item['日期']}，本次应复核{expected_day}")
+            item['日线来源']='演示合成数据' if mode=='demo' else hist.attrs.get('source','来源未标注')
             chan=analyze_chan(hist)
             item['缠论结构']=chan.get('condition',chan.get('reason','结构不可用'))
             item['缠论调整分']=chan.get('score_adjustment',0) if chan.get('valid') else 0
@@ -324,36 +345,34 @@ def produce_report(mode, universe, pick, verified, sectors, alerts, p_df, missin
     (OUT/'report_v2.html').write_text(doc,encoding='utf-8')
 
 
-def main():
-    ap=argparse.ArgumentParser(description='A股第2阶段，绝不自动交易')
-    ap.add_argument('--mode',choices=['demo','live'],default='demo')
-    ap.add_argument('--config',default=str(ROOT/'config.json'))
-    ap.add_argument('--top',type=int,default=80,help='历史日线复核最多几只，建议30-100')
-    ap.add_argument('--notify',action='store_true',help='仅macOS本机通知（不保证送达）')
-    args=ap.parse_args();cfg=load_config(args.config)
-    if args.top<1 or args.top>300:ap.error('top 要在1—300间')
-    errors=[];sources=[]
-    try: universe,desc=full_snapshot(args.mode);sources.append(desc)
-    except Exception as e:
-        if strategy_enabled(cfg):
-            daily=select_five(pd.DataFrame(),cfg,args.mode)
-            daily.update(status='全市场来源失败，V1无候选；请检查数据源后重新扫描',
-                         blockers=['全市场行情不可用：'+type(e).__name__],source_errors=[str(e)])
-            OUT.mkdir(exist_ok=True)
-            path=OUT/('daily_observe_demo.json' if args.mode=='demo' else 'daily_observe.json')
-            temp=path.with_suffix('.tmp');temp.write_text(json.dumps(daily,ensure_ascii=False,indent=2,allow_nan=False),encoding='utf-8');temp.replace(path)
-        print('全市场抓取失败，不输出伪全市场排名:',e,file=sys.stderr);sys.exit(2)
+def record_scan_failure(output, mode, message):
+    write(output/'run_meta.json',{
+        'mode':mode,'generated_at':datetime.now(CST).isoformat(timespec='seconds'),
+        'scan_ok':False,'failure':message,'universe_count':0,'verified_count':0,'errors_count':1,
+    })
+
+
+def run_scan(args, cfg):
+    clock=datetime.now(CST)
+    today=clock.date().isoformat()
+    expected_day=latest_completed_day(OUT, clock) if args.mode=='live' else None
+    quote_day=today if today in calendar_dates(OUT, clock) and (clock.hour,clock.minute)>=(9,30) else expected_day
+    universe,source=full_snapshot(args.mode,expected_quote_day=quote_day)
+    sources=[source]
+    errors=list(universe.attrs.get('source_errors',[]))
+    if args.mode=='live' and not expected_day:
+        errors.append('交易日历待核验，日线只作历史观察')
     pick=filter_universe(universe,max(args.top*2,100),cfg)
-    verified,fail=verify_candidates(pick,args.mode,args.top,float(cfg.get('history_pause_seconds',0.5)),cfg)
+    verified,fail=verify_candidates(pick,args.mode,args.top,float(cfg.get('history_pause_seconds',0.5)),cfg,expected_day=expected_day)
     errors.extend(fail)
-    try:sector,desc=sector_snapshot(args.mode);sources.append(desc);sectors=rank_sectors(sector)
+    try:sector,desc=sector_snapshot(args.mode,use_eastmoney=not source.startswith('腾讯'));sources.append(desc);sectors=rank_sectors(sector)
     except Exception as e:
         errors.append('行业抓取失败: '+str(e));sectors=pd.DataFrame()
     if args.mode=='live':
         prices,feed_errors=snapshot_akshare(cfg);errors.extend(feed_errors)
     else:prices={}
     alerts,p_df,missing,equity,loss,remain=alert_rules(cfg,prices,universe,verified,args.mode)
-    daily=select_five(verified,cfg,args.mode)
+    daily=select_five(verified if expected_day or args.mode=='demo' else pd.DataFrame(),cfg,args.mode)
     if strategy_enabled(cfg):
         daily['source_errors']=errors
         if not daily['count']:
@@ -369,8 +388,10 @@ def main():
     watch_codes={code_str(x['code']) for x in cfg.get('watchlist',[])}
     watch=universe[universe.code.isin(watch_codes)].copy()
     watch.to_csv(OUT/'watch_quotes.csv',index=False,encoding='utf-8-sig')
-    metadata={'mode':args.mode,'generated_at':datetime.now().astimezone().isoformat(timespec='seconds'),
+    metadata={'mode':args.mode,'generated_at':datetime.now(CST).isoformat(timespec='seconds'),
               'scan_ok':True,
+              'expected_daily_asof':expected_day,
+              'verified_asof':str(verified['日期'].max()) if not verified.empty else None,
               'config_hash':hashlib.sha256(json.dumps(cfg,sort_keys=True,ensure_ascii=False).encode()).hexdigest(),
               'universe_count':len(universe),'verified_count':len(verified),
               'source_notes':sources,'errors_count':len(errors),
@@ -381,4 +402,32 @@ def main():
     print(f'已生成 {OUT/"report_v2.html"}；全市场 {len(universe)}；初筛 {len(pick)}；日线复核 {len(verified)}；提醒 {len(alerts)}；精选观察 {daily["count"]}；本机通知 {sent}')
     if errors:print('抓取异常:',*errors[:10],sep='\n - ')
 
-if __name__=='__main__':main()
+
+def main():
+    ap=argparse.ArgumentParser(description='A股全市场筛选')
+    ap.add_argument('--mode',choices=['demo','live'],default='demo')
+    ap.add_argument('--config',default=str(ROOT/'config.json'))
+    ap.add_argument('--top',type=int,default=80,help='历史日线复核最多几只，建议30-100')
+    ap.add_argument('--notify',action='store_true',help='仅macOS本机通知（不保证送达）')
+    args=ap.parse_args()
+    if not 1<=args.top<=300:ap.error('top 要在1—300间')
+    OUT.mkdir(exist_ok=True)
+    with (OUT/'phase2.lock').open('a') as lock:
+        try:
+            fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except BlockingIOError:
+            print('已有扫描正在运行，请稍后查看结果',file=sys.stderr)
+            return 75
+        # A crash or interruption leaves the old report unavailable.
+        record_scan_failure(OUT,args.mode,'扫描进行中，等待本次结果')
+        try:
+            run_scan(args,load_config(args.config))
+        except Exception as exc:
+            message=f'扫描失败：{exc}'
+            record_scan_failure(OUT,args.mode,message)
+            print(message,file=sys.stderr)
+            return 2
+    return 0
+
+
+if __name__=='__main__':sys.exit(main())

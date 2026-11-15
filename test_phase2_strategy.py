@@ -61,6 +61,37 @@ class Phase2V1Tests(unittest.TestCase):
             self.assertTrue(result.empty);self.assertIn('来源失败',errors[0])
         self.assertEqual(select_five(pd.DataFrame(),cfg(),'demo')['count'],0)
 
+    def test_old_daily_bars_are_not_published_as_this_sessions_verification(self):
+        hist,bench=history()
+        with patch.object(phase2,'stock_history',return_value=hist):
+            verified,errors=phase2.verify_candidates(candidates(),'live',2,0,cfg(),bench,expected_day='2026-11-10')
+        self.assertTrue(verified.empty)
+        self.assertEqual(len(errors),2)
+        self.assertIn('日线仅到2026-11-09',errors[0])
+
+    def test_empty_shortlist_can_be_current_after_successful_verification(self):
+        from web_dashboard import create_app
+        with TemporaryDirectory() as folder:
+            root=Path(folder)
+            output=root/'output'
+            output.mkdir()
+            (root/'config.json').write_text(json.dumps(cfg()))
+            (output/'run_meta.json').write_text(json.dumps({
+                'mode':'live','scan_ok':True,'verified_asof':'2026-11-13',
+            }))
+            (output/'daily_observe.json').write_text(json.dumps({
+                'mode':'live','asof':None,'shortlist':[],'strategy_version':'1.0',
+            }))
+            client=create_app(root).test_client()
+            with patch('web_dashboard.strategy.latest_completed_day',return_value='2026-11-13'):
+                latest=client.get('/api/daily-observe').get_json()
+            with patch('web_dashboard.strategy.latest_completed_day',return_value='2026-11-16'):
+                older=client.get('/api/daily-observe').get_json()
+        self.assertEqual(latest['asof'],'2026-11-13')
+        self.assertEqual(latest['count'],0)
+        self.assertFalse(latest['stale'])
+        self.assertTrue(older['stale'])
+
     def test_scope_and_old_snapshot_filters_do_not_create_second_entry(self):
         universe=candidates();universe.loc[1,'code']='300001'
         chosen=phase2.filter_universe(universe,10,cfg())

@@ -18,6 +18,8 @@
       <a href="#risk" class="nav-link">◉ <span>我的持仓</span></a>
       <a href="#watch" class="nav-link">◎ <span>自选与分析</span></a>
       <a href="#daily-observe" class="nav-link">★ <span>每日观察</span><b class="nav-counter" id="nav-count-daily">0</b></a>
+      <a href="/close-review" class="nav-link">◷ <span>收盘复盘</span></a>
+      <a href="/paper-contest" class="nav-link">◈ <span>模拟持仓</span></a>
       <a href="#scanner" class="nav-link">▥ <span>全市场筛选</span></a>
       <details class="nav-group"><summary>交易观察</summary>
         <a href="#signals-reduce" class="nav-link">↘ <span>减仓复核</span><b class="nav-counter" id="nav-count-reduce">0</b></a>
@@ -130,7 +132,7 @@
       <p>登录自动启动：</p><div class="command">python install_intraday_mac.py --interval 10</div>
       <p class="tip">macOS时区可以是日本时间，监控仍按北京时间识别A股交易时段。务必检查持仓与现金台账是否为最新。</p></div>
     </section>
-    <section id="scanner"><div class="section-heading"><div><span class="eyebrow">04 / STOCK SCANNER</span><h2>强势股票筛选</h2><p>先批量快照筛选，再对候选做日线验证；评分只是研究排序。</p></div></div>        <div class="panel"><div class="panel-head"><div><h3>最近扫描</h3><p>扫描需要数分钟，完成后自动更新。</p></div></div><div class="scan-details"><div><span>报告模式</span><strong id="scan-mode">—</strong></div><div><span>生成时间</span><strong id="scan-time">—</strong></div><div><span>市场覆盖</span><strong id="scan-count">—</strong></div><div><span>日线复核</span><strong id="verify-count">—</strong></div></div><div class="btn-row"><button class="btn primary" id="live-scan">联网执行筛选</button><details class="demo-option"><summary>演示测试</summary><button class="btn ghost" id="demo-scan">运行演示（会替换报告）</button></details><a class="btn ghost" href="/report" target="_blank" rel="noopener">查看完整报告 ↗</a></div><p id="job-message" class="job-msg">本次网页会话未运行扫描</p></div>
+    <section id="scanner"><div class="section-heading"><div><span class="eyebrow">04 / STOCK SCANNER</span><h2>强势股票筛选</h2><p>先批量快照筛选，再对候选做日线验证；评分只是研究排序。</p></div></div>        <div class="panel"><div class="panel-head"><div><h3>最近扫描</h3><p>扫描需要数分钟，完成后自动更新。</p></div></div><div class="scan-details"><div><span>报告模式</span><strong id="scan-mode">—</strong></div><div><span>生成时间</span><strong id="scan-time">—</strong></div><div><span>收到报价</span><strong id="scan-count">—</strong></div><div><span>日线复核</span><strong id="verify-count">—</strong></div></div><div class="btn-row"><button class="btn primary" id="live-scan">联网执行筛选</button><details class="demo-option"><summary>演示测试</summary><button class="btn ghost" id="demo-scan">运行演示（会替换报告）</button></details><a class="btn ghost" href="/report" target="_blank" rel="noopener">查看完整报告 ↗</a></div><p id="scan-source" class="tip"></p><p id="job-message" class="job-msg" role="status">本次网页会话未运行扫描</p></div>
 <div class="panel"><div class="table-tabs"><button class="table-tab selected" data-tab="verified">日线验证榜</button><button class="table-tab" data-tab="candidate">快照初筛榜</button><span class="table-help">最多显示前30名</span></div><div id="ranking-table" class="table-wrap"></div></div></section>
     <section id="daily-observe" class="daily-section">
       <div class="section-heading"><div><span class="eyebrow">05 / DAILY FIVE · REVIEW ONLY</span><h2>每日观察 · 最多5只</h2><p>盘后从全市场初筛与日线复核中选出最多5只，结合量价、趋势及简化缠论结构评分。不是确保上涨的买入推荐。</p></div><span id="daily-pill" class="pill muted">尚无扫描</span></div>

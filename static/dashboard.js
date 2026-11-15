@@ -4,6 +4,7 @@ let sessionRefresh=null;
 const $=id=>document.getElementById(id);
 let monitorBusy=false;
 let STORE=null, ranking='verified', editCode=null, busy=false;
+let scanJob=null, scanStarting=false, scanPolling=false;
 let EXIT_SUGGESTIONS={},planSuggestionSerial=0;
 let DAILY=null, STRATEGY=null;
 let T_OBSERVE=null,tObserveBusy=false,tWriteBusy=false;
@@ -90,7 +91,7 @@ async function api(path,method='GET',obj){
   return data;
  }
 }
-async function refresh(){try{const s=await api('/api/state');STORE=s;render(s);refreshStrategy();refreshMonitor();}catch(e){showToast('读取失败：'+e.message,true)}}
+async function refresh(){try{const s=await api('/api/state');STORE=s;render(s);refreshStrategy();refreshMonitor();return true;}catch(e){showToast('读取失败：'+e.message,true);return false;}}
 function table(headers, rows){if(!rows.length)return '<div class="empty">暂无数据。请先运行演示扫描或联网扫描。</div>';return `<table><thead><tr>${headers.map(h=>`<th>${escapeHtml(h)}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table>`;}
 function tr(cells){return '<tr>'+cells.map(c=>`<td>${c}</td>`).join('')+'</tr>';}
 function pill(t,cls='muted'){return `<span class="pill ${cls}">${escapeHtml(t)}</span>`;}
@@ -156,10 +157,19 @@ function render(s){
  $('risk-tag').textContent=!r.valid?'需刷新':r.strategy?.blockers?.length?'V1暂停新增':r.over_budget?'风险超预算':'预算内';$('risk-tag').className='pill '+(!r.valid?'muted':r.over_budget?'danger':'');
  let ratio=r.valid&&r.used!=null&&r.existing_planned_stress!=null?Math.max(0,Math.min(100,(r.used+r.existing_planned_stress)/r.budget*100)):0;
  $('risk-fill').style.width=ratio+'%';
- $('scan-mode').textContent=meta.mode==='demo'?'演示合成数据':meta.mode==='live'?'联网快照（非逐笔实时）':'未运行';
+ $('scan-mode').textContent=meta.scan_ok===false?'扫描失败':meta.mode==='demo'?'演示合成数据':meta.mode==='live'?'联网快照（非逐笔实时）':'未运行';
  $('scan-time').textContent=meta.generated_at||'—';
  $('scan-count').textContent=meta.universe_count??'—';$('verify-count').textContent=meta.verified_count??'—';
- $('job-message').textContent=s.job.running?'扫描正在进行，完成后自动刷新…':(s.job.message||'尚未扫描').slice(-400);
+ if(!scanStarting&&!scanPolling)scanJob=s.job;
+ updateScanControls();
+ const reportNotes=[...(meta.source_notes||[])];
+ if(meta.expected_daily_asof)reportNotes.push('应复核日线 '+meta.expected_daily_asof);
+ if(meta.mode==='live'&&meta.scan_ok!==false)reportNotes.push(meta.verified_asof?'实际日线截至 '+meta.verified_asof:'本次没有可用的日线复核');
+ if(meta.mode==='live'&&s.latest_completed_day&&meta.verified_asof&&s.latest_completed_day!==meta.verified_asof){
+  reportNotes.push('历史榜单，最近完成交易日为 '+s.latest_completed_day);
+ }
+ if(meta.errors_count)reportNotes.push('有 '+meta.errors_count+' 项数据异常，详见完整报告');
+ $('scan-source').textContent=reportNotes.join(' · ');
  renderRanking();renderSector();renderWatch();renderPositions();renderSizing();renderStrategy(STRATEGY,r);refreshDailyObserve();
  const choices=(c.positions||[]).filter(p=>Number(p.quantity)>0).map(p=>`<option value="${escapeHtml(p.code)}">${escapeHtml(p.name)}（${escapeHtml(p.code)}，${format(p.quantity,0)}）</option>`).join('');
  const choose=$('reduction-code');if(choose){const prev=choose.value;choose.innerHTML='<option value="">请选择持仓</option>'+choices;if([...choose.options].some(o=>o.value===prev))choose.value=prev;}
@@ -169,9 +179,20 @@ function render(s){
  if(!s.fresh)applyLatestAccountSnapshot(s);
 }
 function renderRanking(){if(!STORE)return;let rows=ranking==='verified'?STORE.top:STORE.candidates;if(!STORE.meta||!STORE.meta.mode)rows=[];
+ if(scanJob?.running||scanStarting){$('ranking-table').textContent='本次扫描正在运行，完成后更新榜单。';return;}
+ if(STORE.meta?.scan_ok===false){$('ranking-table').textContent='本次扫描失败，暂无榜单。';return;}
+ if(!rows.length&&STORE.meta?.mode){$('ranking-table').textContent=ranking==='verified'?'本次没有可用的日线复核。':'本次没有符合初筛条件的证券。';return;}
+ if(ranking==='verified'&&rows.some(row=>'V1形态通过' in row)){
+  const results=rows.map(row=>tr([val(row['股票名称']),val(row['股票代码']),val(row['日期']),val(row['日线来源']),
+   signedPriceText(row['收盘'],row['涨跌幅%'],3),signedPctText(row['涨跌幅%']),
+   row['V1形态通过']==='True'?pill('通过','') : pill('未通过'),
+   val(row['触发下沿']),val(row['建仓上限']),val(row['V1阻断原因'])]));
+  $('ranking-table').innerHTML=table(['名称','代码','日线日期','来源','收盘','涨跌幅','V1 形态','触发下沿','建仓上限','原因'],results);
+  return;
+ }
  let result;if(ranking==='verified'){
- result=rows.map((x,i)=>tr([`<span class="muted">${i+1}.</span>`,val(x['股票名称']),val(x['股票代码']),signedPriceText(x['收盘'],x['涨跌幅%'],3),signedPctText(x['涨跌幅%']),val(x['MA5']),val(x['MA20']),val(x['20日突破']),`<span class="stop-color">${val(x['止损参考'])}</span>`,`<span class="tp-color">${val(x['第一止盈'])}</span>`,`<span class="tp2-color">${val(x['第二止盈'])}</span>`,`<strong>${val(x['观察评分'])}</strong>`]));
- $('ranking-table').innerHTML=table(['#','名称','代码','收盘','涨跌幅','MA5','MA20','20日突破','止损参考','止盈一','止盈二','评分'],result);
+ result=rows.map((x,i)=>tr([`<span class="muted">${i+1}.</span>`,val(x['股票名称']),val(x['股票代码']),val(x['日期']),val(x['日线来源']),signedPriceText(x['收盘'],x['涨跌幅%'],3),signedPctText(x['涨跌幅%']),val(x['MA5']),val(x['MA20']),val(x['20日突破']),`<span class="stop-color">${val(x['止损参考'])}</span>`,`<span class="tp-color">${val(x['第一止盈'])}</span>`,`<span class="tp2-color">${val(x['第二止盈'])}</span>`,`<strong>${val(x['观察评分'])}</strong>`]));
+ $('ranking-table').innerHTML=table(['#','名称','代码','日线日期','来源','收盘','涨跌幅','MA5','MA20','20日突破','止损参考','止盈一','止盈二','评分'],result);
  }else{
  result=rows.map((x,i)=>tr([i+1,val(x.name),val(x.code),signedPriceText(x.price,x.pct,3),signedPctText(x.pct),x.amount?format(Number(x.amount)/1e8)+'亿':'—',pct(x.turnover),val(x.volume_ratio),val(x['初筛分'])]));
  $('ranking-table').innerHTML=table(['#','名称','代码','快照价','涨跌幅','成交额','换手率','量比','初筛分'],result);
@@ -488,7 +509,40 @@ async function saveTradePlan(e){e.preventDefault();const f=e.target;
  if(!data.legacy_exit_only&&!data.prepared_id){showToast('请先生成并通过V1固定计划核验',true);return;}
  try{const r=await api('/api/trade-plan','PUT',data);$('plan-dialog').close();await refresh();showToast(r.message||'固定计划已保存');}catch(err){showToast('计划保存失败：'+err.message,true);}}
 async function resetTradePlan(){const code=$('plan-form').elements.code.value;if(!confirm(`删除 ${code} 的固定计划？V1将暂停该证券新增；已有持仓风险可能变为待核验。`))return;try{const r=await api('/api/trade-plan/'+code,'DELETE');$('plan-dialog').close();await refresh();showToast(r.message);}catch(e){showToast(e.message,true)}}
-async function scan(mode){try{await api('/api/scan','POST',{mode,top:40});showToast('扫描已启动；全市场扫描及日线复核可能需要一些时间。');$('job-message').textContent='扫描进行中…';}catch(e){showToast(e.message,true)}}
+function updateScanControls(){
+ const pending=scanStarting||Boolean(scanJob?.running);
+ $('live-scan').disabled=pending;
+ $('demo-scan').disabled=pending;
+ $('job-message').textContent=pending?'扫描正在进行，完成后自动刷新…':
+   (scanJob?.message||'尚未扫描').trim().slice(0,600);
+}
+async function scan(mode){
+ if(scanStarting||scanJob?.running)return;
+ scanStarting=true;
+ updateScanControls();
+ renderRanking();
+ try{
+  const result=await api('/api/scan','POST',{mode,top:40});
+  scanJob=result.job;
+ }catch(e){showToast(e.message,true);}
+ finally{scanStarting=false;updateScanControls();renderRanking();}
+ if(scanJob?.running)void pollScan();
+}
+async function pollScan(){
+ if(scanStarting||scanPolling||!scanJob?.running)return;
+ scanPolling=true;
+ try{
+  const job=await api('/api/job');
+  if(job.running)return;
+  // Keep the previous ranking hidden until the new state has loaded.
+  if(!(await refresh()))return;
+  scanJob=STORE?.job?.running?STORE.job:job;
+  updateScanControls();
+  renderRanking();
+  if(!scanJob.running)showToast(job.returncode===0?'扫描结束，榜单已更新。':'扫描未完成，请查看扫描状态。',job.returncode!==0);
+ }catch(e){$('job-message').textContent='暂时无法读取扫描状态，正在重试。';}
+ finally{scanPolling=false;}
+}
 async function updateWatch(event){event.preventDefault();const f=event.target;try{await api('/api/watchlist','POST',{code:f.elements['code'].value.trim(),name:f.elements['name'].value.trim()});f.reset();await refresh();showToast('观察池更新成功');}catch(e){showToast(e.message,true)}}
 async function updateRisk(event){event.preventDefault();const f=event.target;let obj={};for(const k of ['stop_stock','stop_etf','stop_convertible','tp1_pct','tp2_pct','per_trade_risk','max_position_pct','min_reward_risk','max_breakout_extension_pct'])obj[k]=Number(f.elements[k].value);try{const d=await api('/api/risk-settings','PUT',obj);showToast(d.message);await refresh();}catch(e){showToast(e.message,true)}}
 function clearPosition(){const f=$('position-form');f.reset();editCode=null;f.elements['code'].readOnly=false;$('position-form-title').textContent='增加/更新持仓记录';$('position-save').textContent='保存新持仓';}
@@ -928,7 +982,7 @@ async function checkAllHoldingsChan(){
 }
 function init(){initTObserve();for(const [id,handler] of [['strategy-settings-form',saveStrategySettings],['strategy-flow-form',saveStrategyFlow],['strategy-review-form',saveStrategyReview]])$(id)?.addEventListener('submit',handler);$('strategy-reconcile')?.addEventListener('click',reconcileStrategy);$('strategy-resume')?.addEventListener('click',resumeStrategy);$('plan-prepare')?.addEventListener('click',prepareTradePlan);$('plan-suggest')?.addEventListener('click',()=>loadExitSuggestion($('plan-form').elements.code.value));$('plan-manual')?.addEventListener('click',enableManualExitPlan);$('plan-form').elements.legacy_exit_only.addEventListener('change',updatePlanMode);$('strategy-flow-form').elements.date.value=new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());if($('quick-analysis-form'))$('quick-analysis-form').addEventListener('submit',event=>{event.preventDefault();if(!STORE){showToast('账户数据正在加载，请稍候');return;}runAnalysis(event.target.elements['code'].value.trim());});if($('reduction-form'))$('reduction-form').addEventListener('submit',simulateReduction);if($('manual-trade-form')){$('manual-trade-form').addEventListener('submit',saveManualTrade);$('manual-trade-form').elements['date'].value=new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());}if($('trades-refresh'))$('trades-refresh').addEventListener('click',()=>showTrades().catch(e=>showToast(e.message,true)));if($('curve-refresh'))$('curve-refresh').addEventListener('click',refreshCurve);refreshCurve();showTrades().catch(console.warn);if($('chan-check-holdings'))$('chan-check-holdings').addEventListener('click',checkAllHoldingsChan); setupNavigation(); $('daily-refresh').addEventListener('click',refreshDailyObserve);$('daily-restore-form').addEventListener('submit',restoreDaily);$('test-trade-popup').addEventListener('click',demoTradePopup);$('trade-popup-close').addEventListener('click',dismissTradePopup);$('trade-popup-dismiss').addEventListener('click',dismissTradePopup);$('trade-popup-detail').addEventListener('click',viewTradePopup);document.querySelectorAll('.table-tab').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('.table-tab').forEach(x=>x.classList.remove('selected'));b.classList.add('selected');ranking=b.dataset.tab;renderRanking()}));
  $('refresh').addEventListener('click',refresh);$('premarket-refresh').addEventListener('click',refreshMarketContext);$('monitor-refresh').addEventListener('click',refreshMonitor);$('live-scan').addEventListener('click',()=>scan('live'));$('demo-scan').addEventListener('click',()=>scan('demo'));$('watch-form').addEventListener('submit',updateWatch);$('risk-form').addEventListener('submit',updateRisk);$('account-form').addEventListener('submit',updateAccount);$('position-form').addEventListener('submit',updatePosition);$('position-clear').addEventListener('click',clearPosition);$('plan-form').addEventListener('submit',saveTradePlan);$('plan-close').addEventListener('click',()=>$('plan-dialog').close());$('plan-reset').addEventListener('click',resetTradePlan);document.addEventListener('click',dynamicButton);
- setInterval(async()=>{if(STORE?.job?.running){try{const job=await api('/api/job');if(!job.running){await refresh();showToast(job.returncode===0?'扫描完成，报告已刷新。':'扫描失败，请检查记录。',job.returncode!==0)}else {$('job-message').textContent='扫描进行中…'}}catch(e){console.warn(e)}}},3000);
+ setInterval(pollScan,3000);
  setInterval(()=>{$('clock').textContent=new Date().toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour:'2-digit',minute:'2-digit',month:'2-digit',day:'2-digit'})},15000);
  setInterval(refreshDailyObserve,60000);setInterval(refreshStrategy,30000);setInterval(refreshMonitor,6000);setInterval(refreshMarketContext,6000);refreshMarketContext();refreshMonitor();refresh();
 }
