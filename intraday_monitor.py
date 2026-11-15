@@ -25,6 +25,7 @@ from quote_health import assess
 from risk_extensions import tier_alerts,risk_level
 from portfolio_journal import record_equity
 from account_snapshot import save_display_snapshot
+from alert_journal import capture_rows, persist_cycle
 import strategy_runtime as strategy
 import t_runtime as t_runtime
 
@@ -243,7 +244,41 @@ def native_notice(e):
     try:
         subprocess.run(['osascript','-e',applescript],check=True,timeout=8,capture_output=True)
         return True
+    except subprocess.TimeoutExpired:return None
     except (OSError,subprocess.SubprocessError):return False
+
+
+def journal_diagnostics(cfg, quotes, snapshot, active_signals, now):
+    """Archive relevant V1 gates when a prepared candidate reaches its trigger."""
+    if not strategy.enabled(cfg):
+        return []
+    from strategy_setup import evaluate_entry
+    dates = snapshot.get('trading_dates') or []
+    today = str(now.date())
+    if today not in dates or dates.index(today) == 0:
+        return []
+    previous = dates[dates.index(today) - 1]
+    active = {row['code'] for row in active_signals if row.get('trigger') == 'v1_entry'}
+    blocked = []
+    for code, plan in cfg.get('trade_plans', {}).items():
+        quote = quotes.get(code, {})
+        price = valid_price(quote.get('price'))
+        trigger = valid_price(plan.get('trigger_price'))
+        if (code in active or quote.get('held') or not price or not trigger or price < trigger
+                or plan.get('signal_date') != previous or plan.get('setup_verified') is not True):
+            continue
+        result = evaluate_entry(cfg, code, quote, snapshot, now=now)
+        if not result['blockers']:
+            continue
+        key = f'{today}|entry_blocked|{code}|{trigger}|{result["blockers"]}'
+        blocked.append({
+            'id': hashlib.sha256(key.encode()).hexdigest()[:20], 'code': code,
+            'name': quote.get('name', code), 'title': 'V1新增条件受阻', 'trigger': 'v1_entry',
+            'category': 'diagnostic', 'price': price, 'level': trigger,
+            'reason': '已进入计划观察范围，继续等待条件复核。',
+            'blockers': result['blockers'],
+        })
+    return blocked
 
 
 def single_cycle(*,mode,notify=False,force_demo=False,probe=False,interval=10):
@@ -389,6 +424,38 @@ def single_cycle(*,mode,notify=False,force_demo=False,probe=False,interval=10):
                       else '报价异常/停滞疑似，暂停本轮新信号' if health['block_new_signals']
                       else '源报价时间未全部核验：仅显示账户估算，暂停新交易提醒' if health['block_trade_signals']
                       else '盘中持仓已抓取；源报价时间戳已逐只验证（非交易所逐笔实时）')
+    journal_clock=now_cn()
+    if (mode=='live' and not probe and market_open and cal_ok and in_session(journal_clock)
+            and journal_clock.date()==now.date()):
+        try:
+            recording_signals = []
+            recording_events = []
+            if not no_required_prices and not health['block_trade_signals']:
+                recording_events = events
+                recording_signals = active_signals + journal_diagnostics(cfg, quotes, state, active_signals, journal_clock)
+            else:
+                gaps = ['、'.join(health.get(key, [])) for key in
+                        ('missing', 'stale_source', 'unverified_source', 'invalid_jump', 'suspected_freeze')]
+                affected = '、'.join(gap for gap in gaps if gap)
+                key = f'{now.date()}|quote_pause|{state["status"]}|{affected}'
+                recording_signals = [{
+                    'id': hashlib.sha256(key.encode()).hexdigest()[:20], 'code': 'PORT',
+                    'name': '全账户', 'title': '行情暂停', 'trigger': 'quote_pause',
+                    'category': 'diagnostic', 'reason': state['status'],
+                    'blockers': [f'待核验证券 {affected}'] if affected else [],
+                }]
+            archived = persist_cycle(
+                STATUS_FILE.parent,
+                capture_rows(recording_events, recording_signals, quotes, cfg.get('trade_plans', {}),
+                             now=journal_clock, source=state['data_source'], config_hash=cfg_hash),
+                now=journal_clock, notify=notify and not health['block_trade_signals'],
+                send=native_notice, clock=now_cn,
+            )
+            if archived['attempted']:
+                state['notifications_attempted']=archived['attempted']
+                state['notifications_submitted']=archived['submitted']
+        except (OSError, ValueError) as exc:
+            state['errors'].append(f'提醒记录保存失败：{exc}')
     if demo or probe or not(market_open and cal_ok) or no_required_prices or health['block_trade_signals']:
         events=[]
     if mode=='live' and not probe and market_open and cal_ok and events:
@@ -402,9 +469,6 @@ def single_cycle(*,mode,notify=False,force_demo=False,probe=False,interval=10):
             for e in events:
                 e['at']=now.isoformat(timespec='seconds')
                 f.write(json.dumps(e,ensure_ascii=False)+'\n')
-        if notify:
-            state['notifications_attempted']=len(events)
-            state['notifications_submitted']=sum(native_notice(e) for e in events)
     recent=[]
     if not demo and HISTORY_FILE.exists():
         try:

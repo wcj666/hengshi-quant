@@ -4,6 +4,7 @@ from datetime import datetime,timedelta
 from zoneinfo import ZoneInfo
 import unittest
 from t_engine import build_t_observations
+from t_costs import estimate_leg, roundtrip
 
 class TEngineTests(unittest.TestCase):
     def setUp(self):
@@ -28,6 +29,31 @@ class TEngineTests(unittest.TestCase):
         a=self.call();b=self.call();row=a['rows'][0]
         self.assertEqual(row['phase'],'sell_ready');self.assertEqual(row['quantity'],100);self.assertGreaterEqual(row['gross_spread_estimate'],40)
         self.assertEqual(a['signals'][0]['id'],b['signals'][0]['id']);self.assertEqual(a['signals'][0]['category'],'t')
+    def test_break_even_uses_product_tick_and_named_fee_basis(self):
+        terms={'stock':{'commission_per_10k':5,'minimum_commission':5},
+               'etf':{'commission_per_10k':1,'minimum_commission':0}}
+        stock=roundtrip('stock',21,100,20,terms,[])
+        etf=roundtrip('etf',1.29,100,20,terms,[])
+        self.assertEqual(stock['break_even_gap'],.12)
+        self.assertEqual(stock['break_even_buy_price'],20.88)
+        self.assertEqual(etf['break_even_gap'],.001)
+        self.assertEqual(etf['break_even_buy_price'],1.289)
+        self.assertEqual(roundtrip('stock',21,100,20,{},[])['fee_basis'],['reserve','reserve'])
+        self.assertEqual(estimate_leg('stock','buy',2100,terms,[
+            {'kind':'stock','side':'buy','fee':7,'notional':2000},
+            {'kind':'etf','side':'buy','fee':20,'notional':2100},
+        ]),(7.35,'comparable_fills'))
+    def test_fee_assumptions_can_only_tighten_signal_gate(self):
+        book=deepcopy(self.ledger)
+        book['fee_model']={'stock':{'commission_per_10k':5,'minimum_commission':.01}}
+        row=self.call(ledger=book)['rows'][0]
+        self.assertEqual(row['phase'],'sell_ready')
+        self.assertEqual(row['fee_reserve'],20)
+        self.assertLess(row['estimated_roundtrip_fee'],20)
+        book['fee_model']['stock']['minimum_commission']=80
+        result=self.call(ledger=book)
+        self.assertEqual(result['signals'],[])
+        self.assertGreater(result['rows'][0]['fee_reserve'],160)
     def test_unknown_sellable_stays_observation_only(self):
         d=self.call(ledger={'availability':{},'cycles':[]});r=d['rows'][0]
         self.assertEqual(r['phase'],'sell_watch');self.assertIsNone(r['quantity']);self.assertFalse(r['tradable'])

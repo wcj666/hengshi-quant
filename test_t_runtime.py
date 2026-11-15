@@ -49,6 +49,50 @@ class TRuntimeTests(unittest.TestCase):
         self.avail();self.sell(50)
         row=tr.ledger(self.out,self.cfg)['cycles'][0]
         self.assertEqual(row['unbought_quantity'],50);self.assertIsNone(row['paired_net_estimate'])
+    def test_known_leg_fees_settle_only_the_paired_quantity(self):
+        self.avail()
+        sell=tr.record_sell(self.out,self.cfg,{'code':'600406','quantity':100,'sell_price':21,
+                                             'fee':7.31,'sell_filled':True},self.now)
+        for quantity, price, fee in ((30,20,1.25),(20,20.5,0)):
+            tr.record_buyback(self.out,self.cfg,sell['id'],{'quantity':quantity,'price':price,'fee':fee,
+                                                           'buy_filled':True},self.now)
+        row=tr.ledger(self.out,self.cfg,self.now)['cycles'][0]
+        self.assertEqual((row['unbought_quantity'],row['paired_gross_estimate']), (50,40))
+        self.assertEqual((row['paired_fee_actual'],row['paired_net_actual']), (4.91,35.09))
+        self.assertEqual(row['unmatched_sell_fee_actual'],3.65)
+        self.assertIsNone(row['paired_net_estimate'])
+        self.assertEqual(row['fee_status'],'actual')
+    def test_confirmed_fills_reuse_actual_quantity_price_fee_and_holdings(self):
+        self.cfg['positions'][0]['quantity']=250
+        def confirmed(fill_id,side,quantity,price,fee,before,after,offset):
+            return {'id':'id-'+fill_id,'fill_id':fill_id,'date':str(self.now.date()),'asset_type':'stock',
+                    'code':'600406','side':side,'quantity':quantity,'price':price,'fee':fee,
+                    'quantity_before':before,'quantity_after':after,
+                    'executed_at':(self.now+timedelta(minutes=offset)).isoformat()}
+        self.cfg['reconciled_trades']=[
+            confirmed('sell-17','sell',100,21,5.01,300,200,-10),
+            confirmed('buy-17','buy',50,20,1.25,200,250,-5),
+            confirmed('unrelated','buy',50,20,1.25,300,350,-4),
+        ]
+        sell=tr.record_sell(self.out,self.cfg,{'code':'600406','broker_fill_id':'sell-17','sell_filled':True},self.now)
+        with self.assertRaisesRegex(ValueError,'前后持仓'):
+            tr.record_buyback(self.out,self.cfg,sell['id'],{'broker_fill_id':'unrelated','buy_filled':True},self.now)
+        tr.record_buyback(self.out,self.cfg,sell['id'],{'broker_fill_id':'buy-17','buy_filled':True},self.now)
+        with self.assertRaisesRegex(ValueError,'不重复'):
+            tr.record_buyback(self.out,self.cfg,sell['id'],{'broker_fill_id':'buy-17','buy_filled':True},self.now)
+        book=tr.ledger(self.out,self.cfg,self.now)
+        cycle=book['cycles'][0]
+        self.assertEqual(cycle['sell_fill_id'],'id-sell-17')
+        self.assertEqual(cycle['paired_net_actual'],46.24)
+        self.assertFalse(cycle['ledger_sync_required'])
+        self.assertEqual(self.cfg['positions'][0]['quantity'],250)
+        self.assertEqual(len(tr.fee_samples(self.cfg,book)),3)
+    def test_confirmed_fee_model_has_separate_stock_etf_assumptions(self):
+        tr.save_fee_model(self.out,self.cfg,{'kind':'stock','commission_per_10k':5,'minimum_commission':None})
+        terms=tr.save_fee_model(self.out,self.cfg,{'kind':'etf','commission_per_10k':1,'minimum_commission':0})
+        self.assertIsNone(terms['stock']['minimum_commission'])
+        self.assertEqual(terms['etf']['minimum_commission'],0)
+        self.assertEqual(tr.settings(self.cfg,tr.ledger(self.out,self.cfg))['fee_model'],terms)
     def test_buyback_requires_fill_and_same_day(self):
         self.avail();c=self.sell()
         for body,when in [({'quantity':100,'price':20},self.now),({'quantity':100,'price':20,'buy_filled':True},self.now+timedelta(days=1))]:
@@ -65,6 +109,12 @@ class TRuntimeTests(unittest.TestCase):
         self.assertEqual(client.get('/api/intraday',headers=h).json['trade_signals'],[])
     def test_api_csrf_and_no_automatic_portfolio_changes(self):
         (self.root/'config.json').write_text(json.dumps(self.cfg));client=create_app(self.root).test_client();h={'Host':'localhost','X-CSRF-Token':CSRF}
+        terms={'kind':'stock','commission_per_10k':5,'minimum_commission':None}
+        self.assertEqual(client.put('/api/t-fees',headers={'Host':'localhost'},json=terms).status_code,403)
+        self.assertEqual(client.put('/api/t-fees',headers=h,json=terms).status_code,200)
+        fee_model=client.get('/api/t-observe',headers=h).json['settings']['fee_model']
+        self.assertIsNone(fee_model['stock']['minimum_commission'])
+        self.assertEqual(fee_model['stock']['commission_per_10k'],5)
         r=client.put('/api/t-availability',headers={'Host':'localhost'},json={'code':'600406','available_quantity':300});self.assertEqual(r.status_code,403)
         self.assertEqual(client.put('/api/t-availability',headers=h,json={'code':'600406','available_quantity':300}).status_code,200)
         r=client.post('/api/t-cycles',headers=h,json={'code':'600406','quantity':100,'sell_price':21,'sell_filled':True});self.assertEqual(r.status_code,200)

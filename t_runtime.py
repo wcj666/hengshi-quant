@@ -4,18 +4,21 @@ from pathlib import Path
 import secrets
 import threading
 import strategy_runtime as storage
+from quote_health import parse_provider_time
+from t_costs import money, nonnegative, summarize_cycle_costs
 
 CST=storage.CST
 _LOCK=threading.Lock()
 _LAST={}
 
 
-def settings(cfg):
+def settings(cfg, book=None):
     raw=cfg.get('t_settings',{})
     return {'enabled':raw.get('enabled') is True,'mode':'sell_first',
             'fee_reserve':max(20.,storage.number(raw.get('fee_reserve',20),0,100000)),
             'max_fraction':min(1/3,storage.number(raw.get('max_fraction',1/3),0,1)),
             'max_cycles_per_code':1,'last_open_time':'14:45',
+            'fee_model':(book or {}).get('fee_model',{}),
             'note':'仅条件观察；不自动下单。先买后卖暂不给可执行提示，不能使用当日新买股票充当可卖底仓。'}
 
 
@@ -31,17 +34,60 @@ def ledger(output,cfg,now=None):
         cycle['expected_quantity']=expected
         cycle['ledger_sync_required']=int(p.get('quantity',0))!=expected
         cycle['expired']=cycle['date']!=str(now.date())
-        paired=int(cycle.get('buyback_quantity',0));cost=float(cycle.get('buyback_cost',0))
+        paired=int(cycle.get('buyback_quantity',0))
         cycle['unbought_quantity']=int(cycle['quantity'])-paired
-        cycle['paired_gross_estimate']=round(paired*float(cycle['sell_price'])-cost,2) if paired else None
-        cycle['paired_net_estimate']=round(cycle['paired_gross_estimate']-float(cycle['fee_reserve']),2) if paired else None
-        # An unmatched sale is a reduction of holdings, not an earned T spread.
+        cycle.update(summarize_cycle_costs(cycle))
     return data
 
 
 def _save(output,data):
     data['revision']=secrets.token_hex(12)
     storage.write(Path(output)/'t_ledger.json',data)
+
+
+def save_fee_model(output, cfg, body):
+    """Save fee assumptions independently of the actual portfolio ledger."""
+    kind = body.get('kind')
+    if kind not in ('stock', 'etf'):
+        raise ValueError('费率需选择股票或股票ETF')
+    updated = {}
+    for key, maximum in (('commission_per_10k', 30), ('minimum_commission', 100_000)):
+        value = body.get(key)
+        amount = nonnegative(value)
+        if value not in (None, '') and (amount is None or amount > maximum):
+            raise ValueError('佣金或最低费用超出有效范围')
+        updated[key] = amount
+    with storage.locked(output):
+        book = ledger(output, cfg)
+        model = book.setdefault('fee_model', {})
+        model[kind] = updated
+        _save(output, book)
+    return model
+
+
+def fee_samples(cfg, book):
+    """Use recent confirmed fees, with explicitly linked fills counted once."""
+    kinds = {str(p['code']):p.get('type') for p in cfg.get('positions', [])}
+    samples = []
+    seen = set()
+
+    def add(kind, side, qty, price, fee):
+        actual, quantity, unit_price = map(nonnegative, (fee, qty, price))
+        if actual is not None and quantity and unit_price and kind in ('stock', 'etf') and side in ('buy', 'sell'):
+            samples.append({'kind':kind,'side':side,'notional':quantity*unit_price,'fee':actual})
+
+    for fill in cfg.get('reconciled_trades', [])[-120:]:
+        add(fill.get('asset_type') or fill.get('type') or kinds.get(str(fill.get('code'))),
+            fill.get('side'),fill.get('quantity'),fill.get('price'),fill.get('fee'))
+        seen.add(str(fill.get('id') or fill.get('fill_id') or ''))
+    for cycle in book.get('cycles', [])[-30:]:
+        kind = cycle.get('kind') or kinds.get(str(cycle.get('code')))
+        if cycle.get('sell_fill_id') not in seen:
+            add(kind, 'sell', cycle['quantity'], cycle['sell_price'], cycle.get('sell_fee'))
+        for fill in cycle.get('fills', []):
+            if fill.get('broker_fill_id') not in seen:
+                add(kind, 'buy', fill['quantity'], fill['price'], fill.get('fee'))
+    return samples
 
 
 def _position(cfg,code):
@@ -55,6 +101,49 @@ def _quantity(value):
     q=storage.number(value,1,100000000)
     if q!=int(q):raise ValueError('实际成交数量需为正整数；机会提示仍按100股/份取整')
     return int(q)
+
+
+def _fee(value):
+    if value in (None, ''):
+        return None
+    amount = nonnegative(value)
+    if amount is None or amount > 1e8 or money(amount) != amount:
+        raise ValueError('实际费用须为非负金额，最多保留两位小数')
+    return amount
+
+
+def _confirmed_fill(cfg, data, body, code, day, side):
+    requested = body.get('broker_fill_id')
+    if requested in (None, ''):
+        return None, None
+    if not isinstance(requested, str) or len(requested) > 180:
+        raise ValueError('已对账成交编号无效')
+    requested = requested.strip()
+    if not requested:
+        raise ValueError('已对账成交编号无效')
+    candidates = [fill for fill in cfg.get('reconciled_trades', [])
+                  if requested in (str(fill.get('id') or ''), str(fill.get('fill_id') or ''))
+                  and str(fill.get('code')) == code and fill.get('date') == day and fill.get('side') == side]
+    if len(candidates) != 1:
+        raise ValueError('未匹配到唯一的当日同证券同方向已对账成交')
+    fill = candidates[0]
+    identifier = str(fill.get('id') or fill.get('fill_id'))
+    if any(cycle.get('sell_fill_id') == identifier or
+           any(leg.get('broker_fill_id') == identifier for leg in cycle.get('fills', []))
+           for cycle in data['cycles']):
+        raise ValueError('该已对账成交已关联做T，不重复登记')
+    return fill, identifier
+
+
+def _fill_fields(body, fill, price_key):
+    if fill is None:
+        return _quantity(body.get('quantity')), storage.number(body.get(price_key),0.0001,1e7), _fee(body.get('fee'))
+    return _quantity(fill['quantity']), storage.number(fill['price'],0.0001,1e7), _fee(fill.get('fee'))
+
+
+def _check_linked_quantity(fill, before, after):
+    if (fill.get('quantity_before'), fill.get('quantity_after')) != (before, after):
+        raise ValueError('该成交前后持仓与本轮底仓不一致，请核对是否关联了正确成交')
 
 
 def confirm_available(output,cfg,body,now=None):
@@ -74,18 +163,27 @@ def confirm_available(output,cfg,body,now=None):
 def record_sell(output,cfg,body,now=None):
     now=now or datetime.now(CST);today=str(now.date())
     if body.get('sell_filled') is not True:raise ValueError('仅登记已在券商实际成交的做T卖出；计划或普通减仓不能登记为T成交')
-    p=_position(cfg,body.get('code'));code=str(p['code']);qty=_quantity(body.get('quantity'))
-    price=storage.number(body.get('sell_price'),0.0001,1e7)
+    p=_position(cfg,body.get('code'));code=str(p['code'])
     with storage.locked(output):
         data=ledger(output,cfg,now);available=data['availability'].get(code,{})
-        if available.get('date')!=today:raise ValueError('先确认今日券商可卖数量；历史可卖数不能沿用')
+        fill,fill_id=_confirmed_fill(cfg,data,body,code,today,'sell')
+        qty,price,fee=_fill_fields(body,fill,'sell_price')
         if any(x['code']==code and x['date']==today for x in data['cycles']):raise ValueError('同一证券每天只登记一轮T；不要重复登记同一笔卖出')
-        base=int(available['base_quantity']);cap=int(base*settings(cfg)['max_fraction']//100)*100
-        if qty>int(available['available_quantity']) or qty>cap:raise ValueError('超过今日确认可卖数或T仓上限（最多原底仓约1/3，至少保留2/3底仓）；其他减仓请登记普通成交')
-        if int(p['quantity']) not in (base,base-qty):raise ValueError('持仓数量已发生其他变化，重新核对底仓后再登记')
-        cycle={'id':secrets.token_hex(10),'code':code,'name':p['name'],'date':today,'quantity':qty,
+        if fill:
+            base=_quantity(fill.get('quantity_before'))
+            _check_linked_quantity(fill,base,base-qty)
+        else:
+            if available.get('date')!=today:raise ValueError('先确认今日券商可卖数量；历史可卖数不能沿用')
+            base=int(available['base_quantity'])
+            if qty>int(available['available_quantity']):raise ValueError('超过今日确认的可卖数量')
+            if int(p['quantity']) not in (base,base-qty):raise ValueError('持仓数量已发生其他变化，重新核对底仓后再登记')
+        cap=int(base*settings(cfg)['max_fraction']//100)*100
+        if qty>cap:raise ValueError('超过T仓上限（最多原底仓约1/3，至少保留2/3底仓）；其他减仓请登记普通成交')
+        cycle={'id':secrets.token_hex(10),'code':code,'name':p['name'],'kind':p['type'],'date':today,'quantity':qty,
                'sell_price':price,'base_quantity':base,'buyback_quantity':0,'buyback_cost':0.,'status':'open',
+               'sell_fee':fee,'sell_fill_id':fill_id,'sold_at':fill.get('executed_at') if fill else None,
                'fee_reserve':settings(cfg)['fee_reserve'],'recorded_at':now.isoformat(),'fills':[]}
+        cycle.update(summarize_cycle_costs(cycle))
         data['cycles'].append(cycle);_save(output,data)
     return cycle
 
@@ -93,16 +191,25 @@ def record_sell(output,cfg,body,now=None):
 def record_buyback(output,cfg,cycle_id,body,now=None):
     now=now or datetime.now(CST)
     if body.get('buy_filled') is not True:raise ValueError('只登记已经实际成交的接回，不把触价当成交')
-    qty=_quantity(body.get('quantity'));price=storage.number(body.get('price'),0.0001,1e7)
     with storage.locked(output):
         data=ledger(output,cfg,now);cycle=next((x for x in data['cycles'] if x['id']==cycle_id),None)
         if not cycle or cycle['status']!='open':raise ValueError('未找到待接回的实际T卖出')
         if cycle['date']!=str(now.date()):raise ValueError('本轮T已跨日，不沿用昨日接回计划；请按普通成交记录并重新评估')
+        fill,fill_id=_confirmed_fill(cfg,data,body,cycle['code'],cycle['date'],'buy')
+        qty,price,fee=_fill_fields(body,fill,'price')
         remaining=int(cycle['quantity'])-int(cycle['buyback_quantity'])
         if qty>remaining:raise ValueError('接回数量不能超过本轮实际卖出后尚未接回的数量')
-        cycle['fills'].append({'quantity':qty,'price':price,'at':now.isoformat()})
+        if fill:
+            before=int(cycle['base_quantity'])-remaining
+            _check_linked_quantity(fill,before,before+qty)
+        sold_at=parse_provider_time(cycle.get('sold_at'))
+        filled_at=parse_provider_time(fill.get('executed_at')) if fill else None
+        if sold_at and filled_at and filled_at<sold_at:raise ValueError('接回成交时间早于本轮实际卖出')
+        cycle['fills'].append({'quantity':qty,'price':price,'at':now.isoformat(),'fee':fee,
+                               'broker_fill_id':fill_id,'filled_at':fill.get('executed_at') if fill else None})
         cycle['buyback_quantity']+=qty;cycle['buyback_cost']=round(cycle['buyback_cost']+qty*price,4)
         if cycle['buyback_quantity']==cycle['quantity']:cycle['status']='closed';cycle['closed_at']=now.isoformat()
+        cycle.update(summarize_cycle_costs(cycle))
         _save(output,data)
     return cycle
 
@@ -142,8 +249,8 @@ def observe(output,cfg,quotes,risk,*,now=None,market_session=False,calendar_ok=F
     try:
         book=ledger(output,cfg,now);cache=storage.read(Path(output)/'t_minutes.json')
         minutes=cache.get('by_code',{})
-        result=build_t_observations(cfg,quotes,risk,minutes,book,now=now,market_session=market_session,calendar_ok=calendar_ok)
-        result.update(enabled=True,asof=now.isoformat(),settings=settings(cfg),cycles=book['cycles'][-30:],availability=book['availability'],ledger_revision=book.get('revision'),
+        result=build_t_observations(cfg,quotes,risk,minutes,{**book,'fee_samples':fee_samples(cfg,book)},now=now,market_session=market_session,calendar_ok=calendar_ok)
+        result.update(enabled=True,asof=now.isoformat(),settings=settings(cfg,book),cycles=book['cycles'][-30:],availability=book['availability'],ledger_revision=book.get('revision'),
                       status='做T条件观察；不自动交易。普通风险减仓不会产生接回提醒。')
         return result
     except Exception as exc:

@@ -1,0 +1,24 @@
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(185px, 1fr));
+  gap: 12px;
+  margin: 12px 0;
+}
+fieldset { border: 0; margin: 12px 0 0; padding: 0; min-width: 0; }
+.wide { grid-column: 1 / -1; }
+.form-grid .wide { margin: 0; }
+form label { display: flex; flex-direction: column; gap: 5px; color: var(--muted); }
+input, select {
+  padding: 8px;
+  min-width: 0;
+  border: 1px solid #cbd6e4;
+  border-radius: 6px;
+  color: inherit;
+  background: white;
+  font: inherit;
+}
+form select[name="mode"] { width: fit-content; }
+#broker-positions input { width: 110px; }
+#preview-button, #confirm { margin-top: 12px; }
+#confirm { background: #23558d; color: white; }
+#confirm:hover:not(:disabled) { background: #1c4675; }

@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 import hashlib
 import math
 from quote_health import parse_provider_time
+from t_costs import money, roundtrip, sold_fee_for_quantity
 
 CN=ZoneInfo('Asia/Shanghai')
 RISK_EXITS={'stop','take_profit_1','take_profit_2','structure_support','structure_weakness','time_5','time_10'}
@@ -149,6 +150,7 @@ def build_t_observations(cfg,quotes,risk,minute_by_code,ledger,now=None,market_s
     result={'rows':[],'signals':[],'asof':clock.isoformat(),'mode':'sell_first',
             'note':'先卖后买为主；先买后卖受现有V1不加仓及T+1限制，当前不提供可执行提示。阈值尚未回测。'}
     cycles=ledger.get('cycles') or [];availability=ledger.get('availability') or {}
+    fee_model=ledger.get('fee_model') or {};fee_samples=ledger.get('fee_samples') or []
     session=bool(market_session and calendar_ok and clock.weekday()<5 and
                  (time(9,30)<=clock.time()<time(11,30) or time(13)<=clock.time()<time(15)))
     for position in cfg.get('positions',[]):
@@ -191,9 +193,15 @@ def build_t_observations(cfg,quotes,risk,minute_by_code,ledger,now=None,market_s
                 row.update(phase='carry_cash',status='尾盘未接回，不追价',reason='本轮尚未接回可留现金，不为完成做T追买；先核对尾盘可卖数和风险。')
                 result['signals'].append(_signal(row,clock,str(cycle.get('id',''))));continue
             if quantity<100:row.update(phase='blocked',status='剩余不足一手',reason='实际未接回数量不足100股/份，不凑整扩大回补');continue
+            costs=roundtrip(kind,sell_price,quantity,fee,fee_model,fee_samples,
+                            sell_fee=sold_fee_for_quantity(cycle,quantity))
+            row.update(costs)
+            fee=max(fee,costs['estimated_roundtrip_fee'])
             target=sell_price-2*fee/quantity
+            row.update(fee_reserve=fee)
             row.update(target_buy=round(target,4),target_sell=sell_price)
-            gross=(sell_price-price)*quantity;row.update(gross_spread_estimate=round(gross,2),net_spread_estimate=round(gross-fee,2))
+            gross=(sell_price-price)*quantity
+            row.update(gross_spread_estimate=money(gross),net_spread_estimate=money(gross-costs['estimated_roundtrip_fee']))
             blockers=_buyback_blockers(cfg,position,quote,risk,cycle,ledger,quantity,price,fee)
             deviation=prefs['etf_deviation_pct'] if kind=='etf' else prefs['stock_deviation_pct']
             low=min(prices[-12:]);bounce=data['consecutive'] and prices[-3]<prices[-2]<prices[-1] and price>=prices[-1]
@@ -218,11 +226,15 @@ def build_t_observations(cfg,quotes,risk,minute_by_code,ledger,now=None,market_s
         deviation=prefs['etf_deviation_pct'] if kind=='etf' else prefs['stock_deviation_pct']
         peak=max(prices[-12:]);fall=data['consecutive'] and prices[-3]>prices[-2]>prices[-1] and price<=prices[-1] and price<sum(prices[-5:])/5
         target_buy=vwap;row.update(target_buy=round(target_buy,4),target_sell=price)
+        if quantity is not None:
+            costs=roundtrip(kind,price,quantity,prefs['fee_reserve'],fee_model,fee_samples)
+            row.update(costs)
+            row['fee_reserve']=max(prefs['fee_reserve'],costs['estimated_roundtrip_fee'])
         pattern=peak>=vwap*(1+deviation/100) and price>vwap and fall
         if not pattern:continue
         screening_quantity=quantity if quantity is not None else cap
         gross=(price-target_buy)*screening_quantity
-        if gross<2*prefs['fee_reserve']:
+        if gross<2*row['fee_reserve']:
             row.update(status='价差不足，跳过做T',reason='假设回落至分时均价的毛价差不足费用预留的2倍，不为小波动频繁交易');continue
         restore=[];strategy=risk.get('strategy') or {};equity=_positive(risk.get('equity'))
         account=strategy.get('account') or {};limits=cfg.get('strategy_v1') or {}
@@ -239,6 +251,6 @@ def build_t_observations(cfg,quotes,risk,minute_by_code,ledger,now=None,market_s
         elif quantity is None:
             row.update(phase='sell_watch',status='高抛条件观察，待核可卖数量',reason='分时偏离均价后连续3个完成分钟回落；尚未核实当日可卖数量，仅观察，不提供下单股数。',blockers=['请先确认今天券商可卖数量'])
         else:
-            row.update(phase='sell_ready',status='做T高抛条件观察',reason='分时偏离均价后连续3个完成分钟回落，假设价差覆盖费用门槛；仅可复核已确认的旧底仓。卖出后可能无法低价接回。',quantity=quantity,tradable=True,gross_spread_estimate=round(gross,2),net_spread_estimate=round(gross-prefs['fee_reserve'],2))
+            row.update(phase='sell_ready',status='做T高抛条件观察',reason='分时偏离均价后连续3个完成分钟回落，假设价差覆盖费用门槛；仅可复核已确认的旧底仓。卖出后可能无法低价接回。',quantity=quantity,tradable=True,gross_spread_estimate=money(gross),net_spread_estimate=money(gross-row['estimated_roundtrip_fee']))
         result['signals'].append(_signal(row,clock))
     return result

@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import math
+import os
 import re
 import secrets
 import subprocess
@@ -16,6 +17,7 @@ import webbrowser
 from datetime import datetime, timedelta, timezone, time as clock_time
 from zoneinfo import ZoneInfo
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 from flask import Flask, jsonify, render_template, request, send_file
 from app import code_str, load_config, stock_history, score_stock
@@ -35,11 +37,13 @@ from account_snapshot import load_display_snapshot
 from broker_snapshot import latest_broker_snapshot
 import strategy_runtime as strategy
 import t_runtime as t_runtime
+import trade_reconciliation as reconcile
 from suggested_exit import build_exit_suggestion
 
 ROOT = Path(__file__).resolve().parent
 CSRF = secrets.token_urlsafe(32)
 _EXIT_SECRET=secrets.token_bytes(32)
+_TRADE_SECRET=secrets.token_bytes(32)
 WRITE_LOCK = threading.RLock()
 JOB_LOCK = threading.Lock()
 JOB = {'running':False,'message':'尚未在本次网页会话启动扫描','started':None,'finished':None,'returncode':None}
@@ -98,9 +102,18 @@ def create_app(folder:Path=ROOT):
     def save_config(cfg):
         # Persist using an atomic replace to prevent partial reads by the scheduled scanner.
         load_config_values(cfg)
-        path=confpath.with_suffix('.json.tmp')
-        path.write_text(json.dumps(cfg,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
-        path.replace(confpath)
+        path = None
+        try:
+            with NamedTemporaryFile(mode='w', encoding='utf-8', dir=folder, delete=False) as handle:
+                path = Path(handle.name)
+                json.dump(cfg, handle, ensure_ascii=False, indent=2, allow_nan=False)
+                handle.write('\n')
+                handle.flush()
+                os.fsync(handle.fileno())
+            path.replace(confpath)
+        finally:
+            if path is not None:
+                path.unlink(missing_ok=True)
 
     def load_config_values(cfg):
         if cfg.get('baseline_equity',0)<=0 or cfg.get('max_additional_loss',0)<=0 or cfg.get('cash',-1)<0:
@@ -207,6 +220,77 @@ def create_app(folder:Path=ROOT):
 
     @app.route('/')
     def index(): return render_template('dashboard.html',csrf=CSRF)
+
+    @app.route('/trade-reconcile')
+    def trade_reconcile_page():
+        return render_template('trade_reconcile.html', csrf=CSRF)
+
+    @app.route('/trade-reconcile/template.csv')
+    def trade_reconcile_template():
+        return app.response_class(
+            '\ufeff' + ','.join(reconcile.FIELDS) + '\r\n',
+            mimetype='text/csv',
+            headers={'Content-Disposition': 'attachment; filename="hengshi-trades.csv"'},
+        )
+
+    @app.route('/api/trade-reconcile')
+    def trade_reconcile_data():
+        cfg = config()
+        receipt = cfg.get('trade_reconciliation', {})
+        snapshot = latest_broker_snapshot(output, cfg) or {}
+        return jsonify(cash=cfg['cash'], positions=cfg.get('positions', []),
+                       last_checked=receipt.get('broker_asof'), last_snapshot=snapshot.get('asof'),
+                       period_pnl=receipt.get('period_pnl'),
+                       trades=list(reversed(cfg.get('reconciled_trades', [])[-100:])),
+                       flows=list(reversed(cfg.get('reconciled_cashflows', [])[-100:])))
+
+    def trade_preview(cfg, body):
+        snapshot = latest_broker_snapshot(output, cfg) or {}
+        from alert_journal import validate_fill_link
+        def resolve_alert(fill, trades):
+            return validate_fill_link(output, fill, trades)
+        return reconcile.prepare(
+            cfg, body, previous_snapshot=snapshot,
+            legacy_flows=strategy.read(output/'strategy_cashflows.json', []), resolve_alert=resolve_alert,
+        )
+
+    def trade_signature(cfg, data):
+        return hmac.new(_TRADE_SECRET, reconcile.digest([cfg, data]).encode(), hashlib.sha256).hexdigest()
+
+    @app.route('/api/trade-reconcile/preview', methods=['POST'])
+    def preview_broker_trades():
+        body = request.get_json(silent=True)
+        with WRITE_LOCK:
+            cfg = config()
+            _, preview = trade_preview(cfg, body)
+        token = trade_signature(cfg, body) if not preview['differences'] and preview['events'] else None
+        return jsonify(**preview, token=token)
+
+    @app.route('/api/trade-reconcile/confirm', methods=['POST'])
+    def confirm_broker_trades():
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict) or not isinstance(body.get('token'), str):
+            raise ValueError('请先预览并核对本批成交')
+        with WRITE_LOCK:
+            cfg = config()
+            data = body.get('data')
+            updated, preview = trade_preview(cfg, data)
+            if not preview['events']:
+                return jsonify(ok=True, message='这些流水已确认。本次无新增记录。')
+            if (preview['differences'] or not hmac.compare_digest(body['token'], trade_signature(cfg, data))):
+                return jsonify(error='账户或本批数据发生变化，请重新预览。'), 409
+            save_config(updated)
+        return jsonify(ok=True, message='成交、持仓和现金已同步。盘中额度仍需完整实时行情核验。',
+                       count=len(preview['events']), cash=updated['cash'])
+
+    @app.route('/alert-journal')
+    def alert_journal_page():
+        return render_template('alert_journal.html')
+
+    @app.route('/api/alert-journal')
+    def alert_journal_data():
+        from alert_journal import load_journal
+        return jsonify(load_journal(output, config().get('reconciled_trades', [])))
 
     @app.route('/backtest')
     def backtest_page():
@@ -353,7 +437,8 @@ def create_app(folder:Path=ROOT):
                      strategy_account=account_context)
         risk['available_new_risk']=None
         # Sizing needs a valid account state, plus current quote for that particular watch.
-        result={'config':cfg,'watchlist':watches,'risk':risk,'meta':metadata,
+        visible_cfg={k:v for k,v in cfg.items() if k not in ('reconciled_trades','reconciled_cashflows','trade_reconciliation')}
+        result={'config':visible_cfg,'watchlist':watches,'risk':risk,'meta':metadata,
                 'exit_suggestions':exit_suggestions(cfg),
                 'display_snapshot':load_display_snapshot(output/'last_account_snapshot.json',cfg),
                 'broker_snapshot':latest_broker_snapshot(output,cfg),
@@ -508,7 +593,8 @@ def create_app(folder:Path=ROOT):
                    and not state.get('quote_health',{}).get('block_trade_signals'))
         if not payload:
             payload={'rows':[],'signals':[],'status':'等待后台采集当前分钟数据后核验做T条件'}
-        payload.update(enabled=t_runtime.settings(cfg)['enabled'],settings=t_runtime.settings(cfg),
+        settings=t_runtime.settings(cfg,book)
+        payload.update(enabled=settings['enabled'],settings=settings,
                        cycles=book['cycles'][-30:],availability=book['availability'],stale=not valid)
         if not valid:
             payload['signals']=[]
@@ -522,15 +608,25 @@ def create_app(folder:Path=ROOT):
         with WRITE_LOCK:entry=t_runtime.confirm_available(output,config(),request.get_json(silent=True) or {})
         return jsonify(ok=True,availability=entry,message='已记录今日券商可卖数量；仍须核对实际委托与T+1，不自动交易。')
 
+    @app.route('/api/t-fees',methods=['PUT'])
+    def t_fees():
+        with WRITE_LOCK:
+            model=t_runtime.save_fee_model(output,config(),request.get_json(silent=True) or {})
+        return jsonify(ok=True,fee_model=model,message='已保存费用参数，下轮盘中核验将按新参数估算。')
+
     @app.route('/api/t-cycles',methods=['POST'])
     def t_sell():
-        with WRITE_LOCK:cycle=t_runtime.record_sell(output,config(),request.get_json(silent=True) or {})
-        return jsonify(ok=True,cycle=cycle,message='已登记实际做T卖出；请同步持仓与现金并对账。普通减仓不会自动登记为T。')
+        body=request.get_json(silent=True) or {}
+        with WRITE_LOCK:cycle=t_runtime.record_sell(output,config(),body)
+        message='已关联对账中的实际卖出。' if body.get('broker_fill_id') else '已登记实际做T卖出；请同步持仓与现金并对账。'
+        return jsonify(ok=True,cycle=cycle,message=message)
 
     @app.route('/api/t-cycles/<cycle_id>/buyback',methods=['POST'])
     def t_buyback(cycle_id):
-        with WRITE_LOCK:cycle=t_runtime.record_buyback(output,config(),cycle_id,request.get_json(silent=True) or {})
-        return jsonify(ok=True,cycle=cycle,message='已登记实际接回；请同步持仓与现金，今日新买份额不增加今日可卖数量。')
+        body=request.get_json(silent=True) or {}
+        with WRITE_LOCK:cycle=t_runtime.record_buyback(output,config(),cycle_id,body)
+        message='已关联对账中的实际接回。' if body.get('broker_fill_id') else '已登记实际接回；请同步持仓与现金。'
+        return jsonify(ok=True,cycle=cycle,message=message)
 
     @app.route('/api/t-cycles/<cycle_id>/close',methods=['POST'])
     def t_leave_cash(cycle_id):
@@ -540,7 +636,10 @@ def create_app(folder:Path=ROOT):
     @app.route('/api/trades',methods=['GET','POST'])
     def manual_trades():
         path=output/'manual_trade_log.jsonl'
-        if request.method=='GET':return jsonify(rows=list(reversed(read_lines(path,200))),note='仅人工登记记录，不连接券商、不自动改变持仓或现金。')
+        if request.method=='GET':
+            rows = read_lines(path,200) + config().get('reconciled_trades', [])[-200:]
+            rows.sort(key=lambda row: (row.get('date', ''), row.get('executed_at', row.get('logged_at', ''))), reverse=True)
+            return jsonify(rows=rows[:200])
         with WRITE_LOCK:
             entry=log_manual_trade(path,request.get_json(silent=True) or {})
         return jsonify(ok=True,trade=entry,message='成交记录已保存；仍需在持仓与现金台账中同步实际成交变化。')
@@ -624,6 +723,9 @@ def create_app(folder:Path=ROOT):
         with WRITE_LOCK:
             cfg = config()
         snapshot = latest_broker_snapshot(output, cfg)
+        confirmed = reconcile.close_snapshot(cfg)
+        if confirmed and (not snapshot or parse_provider_time(confirmed['asof']) >= parse_provider_time(snapshot['asof'])):
+            snapshot = confirmed
         clock = datetime.now(strategy.CST)
         expected = strategy.latest_completed_day(output, clock)
         quote_cfg = {'positions': (snapshot or {}).get('positions') or cfg.get('positions', [])}
@@ -791,6 +893,10 @@ def create_app(folder:Path=ROOT):
         sector=str(body.get('sector','')).strip()
         if len(sector)>40:raise ValueError('行业分类不应超过40字')
         if sector:p['sector']=sector
+        if 'theme' in body:
+            theme=str(body['theme'] or '').strip()
+            if len(theme)>40:raise ValueError('主题归组不应超过40字')
+            p['theme']=theme
         with WRITE_LOCK:
             cfg=config();old=cfg.setdefault('positions',[])
             idx=next((i for i,x in enumerate(old) if x['code']==code),None)

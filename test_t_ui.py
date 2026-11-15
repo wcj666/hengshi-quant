@@ -29,6 +29,18 @@ if(html.includes('123.456')||html.includes('78.91')||html.includes('>300<'))thro
 if(!html.includes('不沿用旧价位')||!html.includes('待核验'))throw Error('stale reason not visible');
 ''')
 
+    def test_fee_break_even_and_partial_reduction_presented_separately(self):
+        self.run_js(r'''
+const row={name:'测试',code:'600641',price:21,quantity:100,break_even_gap:.12,break_even_quantity:100,break_even_buy_price:20.88,fee_basis:['broker_terms','actual_sell'],estimated_roundtrip_fee:11.11};
+const cycle={name:'配对测试',date:'2026-11-11',quantity:100,buyback_quantity:50,unbought_quantity:50,sell_price:21,status:'cash',paired_gross_estimate:40,paired_fee_actual:4.91,paired_net_actual:35.09};
+renderTObserve({enabled:true,stale:false,rows:[row],cycles:[cycle]});
+if(!$('t-observation-list').innerHTML.includes('保本价差')||!$('t-observation-list').innerHTML.includes('20.880'))throw Error('tick-adjusted break-even not shown');
+if(!$('t-cycle-list').innerHTML.includes('35.09')||!$('t-cycle-list').innerHTML.includes('余量记为减仓'))throw Error('actual paired PnL or remaining reduction missing');
+renderTObserve({enabled:true,stale:true,rows:[row],cycles:[cycle]});
+if($('t-observation-list').innerHTML.includes('20.880'))throw Error('stale break-even remained');
+if(!$('t-cycle-list').innerHTML.includes('35.09'))throw Error('historical fee result hidden');
+''')
+
     def test_missing_sellable_quantity_does_not_invent_t_size_or_cycle(self):
         self.run_js(r'''
 renderTObserve({enabled:true,stale:false,rows:[{code:'600641',name:'条件待核验',phase:'sell_watch',price:34,quantity:100,blockers:['今日券商可卖数量未确认']}],availability:{},cycles:[]});

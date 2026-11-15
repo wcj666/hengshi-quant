@@ -65,7 +65,10 @@ def iso_day(value):
 
 def ledger_hash(cfg):
     rows=[{k:p.get(k) for k in ('code','type','quantity','cost')} for p in cfg.get('positions',[]) if int(p.get('quantity',0))>0]
-    return hashlib.sha256(json.dumps({'cash':cfg.get('cash'),'positions':sorted(rows,key=lambda p:p['code'])},sort_keys=True).encode()).hexdigest()
+    state={'cash':cfg.get('cash'),'positions':sorted(rows,key=lambda p:p['code'])}
+    checked=cfg.get('trade_reconciliation',{}).get('broker_asof')
+    if checked:state['trade_reconciliation']=checked
+    return hashlib.sha256(json.dumps(state,sort_keys=True).encode()).hexdigest()
 
 
 def settings(cfg):
@@ -111,7 +114,8 @@ def _account_view(output,cfg,account,now):
     account['needs_reconcile']=bool(account.get('needs_reconcile') or (account.get('initialized') and account.get('ledger_hash')!=ledger_hash(cfg)))
     # Displaying the journal never certifies that prices remain fresh.
     account['verified']=bool(account.get('verified') and not account['needs_reconcile'])
-    account['opens_today']=len({x.get('code') for x in _lines(Path(output)/'manual_trade_log.jsonl')
+    trades=_lines(Path(output)/'manual_trade_log.jsonl')+cfg.get('reconciled_trades',[])
+    account['opens_today']=len({x.get('code') for x in trades
                                 if x.get('side')=='buy' and x.get('date')==str(now.date())} |
                                {str(p['code']) for p in cfg.get('positions',[]) if int(p.get('quantity',0))>0
                                 and cfg.get('trade_plans',{}).get(str(p['code']),{}).get('buy_date')==str(now.date())
@@ -151,6 +155,10 @@ def get_account(output,cfg,now=None):
     return _account_view(output,cfg,raw,now)
 
 
+def cashflows(output,cfg):
+    return read(Path(output)/'strategy_cashflows.json',[])+cfg.get('reconciled_cashflows',[])
+
+
 def observe(output,cfg,equity,*,verified=False,at=None,reconcile=False):
     """Only a complete source-verified poll may initialize/advance the V1 high-water mark."""
     now=at or datetime.now(CST)
@@ -168,12 +176,14 @@ def observe(output,cfg,equity,*,verified=False,at=None,reconcile=False):
         if a.get('needs_reconcile') and not reconcile:
             a['verified']=False;write(path,a)
             return _account_view(output,cfg,a,now)
-        flows=read(Path(output)/'strategy_cashflows.json',[])
+        flows=cashflows(output,cfg)
         if not a.get('initialized'):
             a={'initialized':True,'initial_equity':equity,'initialized_at':now.isoformat(),'high_water':equity,
                'flow_ids_at_start':[x['id'] for x in flows],'net_external_flow':0.0}
         flow_ids=set(a.get('flow_ids_at_start',[]))
-        flow=sum(float(x['amount']) for x in flows if x['id'] not in flow_ids)
+        initialized_at=datetime.fromisoformat(a['initialized_at'])
+        flow=sum(float(x['amount']) for x in flows if x['id'] not in flow_ids
+                 and ('executed_at' not in x or datetime.fromisoformat(x['executed_at'])>=initialized_at))
         adjusted=equity-flow; high=max(float(a['high_water']),adjusted)
         dd=max(0,high-adjusted)
         a.update(verified=True,equity=round(equity,2),adjusted_equity=round(adjusted,2),
@@ -192,6 +202,8 @@ def add_flow(output,cfg,body):
     day=iso_day(body.get('date')); a=get_account(output,cfg)
     if not a.get('initialized'):raise ValueError('先用完整真实行情初始化 V1，历史转账不计入新体系')
     if day<a['initialized_at'][:10]:raise ValueError('只能记录 V1 初始化后的净外部转账')
+    if any(x['date']==day and x['amount']==amount for x in cfg.get('reconciled_cashflows',[])):
+        raise ValueError('同日同额资金流水已存在，请核对实际流水编号')
     entry={'id':secrets.token_hex(8),'date':day,'amount':amount,'note':str(body.get('note',''))[:300],
            'recorded_at':datetime.now(CST).isoformat()}
     with locked(output):
@@ -249,7 +261,7 @@ def status(output,cfg):
     if account.get('paused'):blockers.append(account.get('pause_reason') or '连续亏损/违规冷静期')
     blockers.extend(f"{p['name']}待补：{'、'.join(p['missing'])}" for p in legacy if p['missing'])
     return {'enabled':enabled(cfg),'settings':settings(cfg),'account':account,'blockers':blockers,
-            'legacy_positions':legacy,'plans':plans,'flows':read(Path(output)/'strategy_cashflows.json',[]),
+            'legacy_positions':legacy,'plans':plans,'flows':cashflows(output,cfg),
             'reviews':read(Path(output)/'strategy_reviews.json',[]),'calendar_verified':bool(calendar_dates(output))}
 
 

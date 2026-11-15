@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>提醒复核 · 衡势</title>
+  <link rel="icon" href="/static/hengshi-logo.svg">
+  <link rel="stylesheet" href="/static/v1_backtest.css">
+  <script src="/static/alert_journal.js" defer></script>
+</head>
+<body>
+<main class="page">
+  <header class="topbar">
+    <div class="title-group">
+      <img src="/static/hengshi-logo.svg" alt="" width="48" height="48">
+      <div><a class="back-link" href="/">← 衡势研究台</a><h1>盘中提醒复核</h1></div>
+    </div>
+    <button id="refresh" type="button">刷新记录</button>
+  </header>
+  <p id="status" class="status" role="status">正在读取提醒账本…</p>
+  <section class="panel" id="report" hidden>
+    <div class="section-head">
+      <div>
+        <h2>盘中记录</h2>
+        <p>提醒按交易日归档。成交状态来自已对账的实际成交。分钟回放使用最近生成的历史回测报告。</p>
+      </div>
+      <label for="day">交易日 <select id="day"></select></label>
+    </div>
+    <div class="table-wrap" tabindex="0" aria-label="提醒及成交复核记录">
+      <table>
+        <thead><tr><th>提醒</th><th>观察时间</th><th>行情时间与价格</th><th>条件与阻断</th><th>处理与成交</th><th>系统通知</th><th>分钟回放</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+</body>
+</html>

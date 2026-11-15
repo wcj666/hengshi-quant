@@ -546,7 +546,7 @@ async function pollScan(){
 async function updateWatch(event){event.preventDefault();const f=event.target;try{await api('/api/watchlist','POST',{code:f.elements['code'].value.trim(),name:f.elements['name'].value.trim()});f.reset();await refresh();showToast('观察池更新成功');}catch(e){showToast(e.message,true)}}
 async function updateRisk(event){event.preventDefault();const f=event.target;let obj={};for(const k of ['stop_stock','stop_etf','stop_convertible','tp1_pct','tp2_pct','per_trade_risk','max_position_pct','min_reward_risk','max_breakout_extension_pct'])obj[k]=Number(f.elements[k].value);try{const d=await api('/api/risk-settings','PUT',obj);showToast(d.message);await refresh();}catch(e){showToast(e.message,true)}}
 function clearPosition(){const f=$('position-form');f.reset();editCode=null;f.elements['code'].readOnly=false;$('position-form-title').textContent='增加/更新持仓记录';$('position-save').textContent='保存新持仓';}
-async function updatePosition(event){event.preventDefault();const f=event.target;let obj={};for(const k of ['code','name','type','sector','quantity','cost','baseline_price'])obj[k]=f.elements[k].value;try{const d=await api('/api/positions',editCode?'PUT':'POST',obj);clearPosition();showToast(d.message);await refresh();}catch(e){showToast(e.message,true)}}
+async function updatePosition(event){event.preventDefault();const f=event.target;let obj={};for(const k of ['code','name','type','sector','theme','quantity','cost','baseline_price'])obj[k]=f.elements[k].value;try{const d=await api('/api/positions',editCode?'PUT':'POST',obj);clearPosition();showToast(d.message);await refresh();}catch(e){showToast(e.message,true)}}
 async function updateAccount(e){e.preventDefault();try{const d=await api('/api/account','PUT',{cash:Number(e.target.elements['cash'].value)});showToast(d.message);await refresh();}catch(e){showToast(e.message,true)}}
 async function dynamicButton(e){const b=e.target.closest('[data-action]');if(!b)return;const {action,code}=b.dataset;if(action==='analyze')return runAnalysis(code,'live');
  if(action==='plan')return editTradePlan(code);
@@ -564,7 +564,7 @@ async function dynamicButton(e){const b=e.target.closest('[data-action]');if(!b)
  const lower=prompt(`${name}：跌破观察价（留空代表关闭）`,old.below??'');if(lower===null)return;
  const higher=prompt(`${name}：突破观察价（留空代表关闭）`,old.above??'');if(higher===null)return;
  try{const d=await api('/api/levels','PUT',{code,below:lower.trim(),above:higher.trim()});await refresh();showToast(d.message);}catch(e){showToast(e.message,true)}}
- if(action==='edit-position'){const p=STORE.config.positions.find(x=>x.code===code);if(!p)return;const f=$('position-form');$('position-editor').open=true;for(const k of ['code','name','type','sector','quantity','cost','baseline_price'])f.elements[k].value=p[k]??'';f.elements['code'].readOnly=true;editCode=code;$('position-form-title').textContent='编辑持仓 '+p.name;$('position-save').textContent='保存更新';f.scrollIntoView({behavior:'smooth',block:'center'});}
+ if(action==='edit-position'){const p=STORE.config.positions.find(x=>x.code===code);if(!p)return;const f=$('position-form');$('position-editor').open=true;for(const k of ['code','name','type','sector','theme','quantity','cost','baseline_price'])f.elements[k].value=p[k]??'';f.elements['code'].readOnly=true;editCode=code;$('position-form-title').textContent='编辑持仓 '+p.name;$('position-save').textContent='保存更新';f.scrollIntoView({behavior:'smooth',block:'center'});}
  if(action==='remove-position'){if(!confirm(`将持仓 ${code} 从本地台账移除？必须自己同步现金，该操作不会在券商卖出。`))return;try{const d=await api(`/api/positions/${code}`,'DELETE');await refresh();showToast(d.message);}catch(e){showToast(e.message,true)}}
 }
 async function restoreDaily(e){
@@ -749,6 +749,22 @@ function setTSelectOptions(formId,field,options,placeholder){
  const previous=select.value||'',html='<option value="">'+escapeHtml(placeholder)+'</option>'+options.map(([value,label])=>`<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`).join('');
  if(select.innerHTML!==html){select.innerHTML=html;select.value=options.some(([value])=>String(value)===previous)?previous:'';}
 }
+function tFeeTerms(model){
+ return [['stock','股票'],['etf','股票 ETF']].map(([kind,label])=>{
+  const row=model?.[kind]||{};
+  const rate=row.commission_per_10k==null?'佣金待核对':'佣金万 '+format(row.commission_per_10k,2);
+  const minimum=row.minimum_commission==null?'最低佣金待核对':'单笔最低 '+money(row.minimum_commission);
+  return label+' · '+rate+' · '+minimum;
+ }).join(' ｜ ');
+}
+function seedTFeeForm(data){
+ const form=$('t-fee-form'),fields=form?.elements,kind=fields?.kind?.value;
+ if(!kind)return;
+ const terms=data?.settings?.fee_model?.[kind]||{};
+ fields.commission_per_10k.value=terms.commission_per_10k??'';
+ fields.minimum_commission.value=terms.minimum_commission??'';
+ form.dataset.feeReady='true';
+}
 function renderTObserve(data){
  if(!$('t-observation-list'))return;
  const d=data||{},active=d.enabled===true&&!d.stale,rows=d.rows||[],cycles=d.cycles||[];
@@ -757,20 +773,32 @@ function renderTObserve(data){
  $('t-status').textContent=status+(d.asof?' · 数据截至 '+d.asof:'')+(active?'':'；当前不可用于实时做T');
  $('t-count').textContent=!d.enabled?'做T观察未启用':d.stale?'数据待更新':rows.length+'只持仓观察';
  $('t-count').className='pill '+(active?'':'muted');
- $('t-settings').textContent=`先卖后买 · 每只每天最多1轮 · 费用滑点预留至少 ${money(Math.max(20,Number(d.settings?.fee_reserve)||20))}。预期价差需覆盖费用，尾盘不强制接回；收益数字仅估算。`;
+ $('t-settings').textContent=`先卖后买 · 每只每天最多 1 轮 · 风控费用滑点至少预留 ${money(Math.max(20,Number(d.settings?.fee_reserve)||20))}。保本价差按确认数量测算，盘中提示另有风控门槛。`;
+ const feeSummary=$('t-fee-model-summary');
+ if(feeSummary)feeSummary.textContent=tFeeTerms(d.settings?.fee_model);
+ if($('t-fee-form')?.dataset?.feeReady!=='true')seedTFeeForm(d);
  $('t-observation-list').innerHTML=rows.length?rows.map(row=>{
   const blockers=(row.blockers||[]).map(noteText),price=active?row.price:null;
   const quantity=active&&!blockers.length&&row.quantity!==null&&row.quantity!==undefined&&Number.isInteger(Number(row.quantity))&&Number(row.quantity)>=100?Number(row.quantity):null;
   const net=active?row.net_spread_estimate:null,gross=active?row.gross_spread_estimate:null;
+  const modeled=active&&Number.isFinite(row.break_even_gap);
+  const basis=(row.fee_basis||[]), feeLabel=basis.includes('reserve')?'含费用预留':basis.includes('comparable_fills')?'含相近实付样本':'按设置及已知费用';
   return `<article class="t-observation-card ${active&&blockers.length?'blocked':''}"><div class="signal-card-head"><strong>${escapeHtml(row.name||row.code)}（${escapeHtml(row.code)}）</strong><span class="signal-tag">${escapeHtml(active?tPhaseLabel(row.phase):'历史/待更新')}</span></div>
   <p>${escapeHtml(active?(row.reason||row.status||'等待后端条件核验'):'数据过期或观察未启用，不沿用旧价位作为实时做T条件。')}</p>
   <div class="t-price-grid"><div><span>最新参考</span><b>${priceText(price)}</b></div><div><span>分时均价</span><b>${priceText(active?row.vwap:null)}</b></div><div><span>高抛观察</span><b>${priceText(active?row.target_sell:null)}</b></div><div><span>接回观察</span><b>${priceText(active?row.target_buy:null)}</b></div></div>
-  <div class="signal-fields"><span>核验数量 <strong>${quantity===null?'—（待核验）':format(quantity,0)}</strong></span><span>毛价差估算 <strong>${money(gross)}</strong></span><span>费用滑点预留 <strong>${money(row.fee_reserve)}</strong></span><span>扣预留后估算 <strong>${money(net)}</strong></span></div>
+  <div class="signal-fields"><span>核验数量 <strong>${quantity===null?'—（待核验）':format(quantity,0)}</strong></span><span>毛价差估算 <strong>${money(gross)}</strong></span><span>预估往返费用 <strong>${money(active?row.estimated_roundtrip_fee:null)}</strong></span><span>扣费后估算 <strong>${money(net)}</strong></span></div>
+  ${modeled?`<div class="signal-fields"><span>${format(row.break_even_quantity,0)} 股／份保本价差 <strong>${format(row.break_even_gap,4)} 元／股或份</strong></span><span>估算保本回补价上限 <strong>${priceText(row.break_even_buy_price)}</strong></span><span>${feeLabel}</span></div>`:''}
   ${blockers.length?'<ul class="t-blockers">'+blockers.map(x=>`<li>${escapeHtml(x)}</li>`).join('')+'</ul>':''}<small>参考区间不是委托；跌了不等于该接回，卖出也不保证能接回。${row.cycle_id?'本轮 '+escapeHtml(row.cycle_id):'尚无本轮实际T卖出记录时，不提供接回任务。'}</small></article>`;
  }).join(''):'<p class="tip">尚无可核验的做T观察。请等待分钟行情与本地持仓匹配；不会用演示价格补齐。</p>';
  const availability=Array.isArray(d.availability)?d.availability:Object.entries(d.availability||{}).map(([code,x])=>({...x,code}));
  $('t-availability-list').innerHTML=availability.length?'<h4>已确认的可卖数量（以记录日期为准）</h4>'+table(['代码','确认日期','确认可卖数量'],availability.map(x=>tr([escapeHtml(x.code),escapeHtml(x.date||'待核验'),format(x.available_quantity,0)]))):'<p class="tip">尚未确认今日可卖数量；只展示观察，不核定可执行股数。</p>';
- $('t-cycle-list').innerHTML=cycles.length?'<h4>本地T轮次 · 不代表券商账户已同步</h4>'+table(['标的 / 日期','实际T卖出','已接回 / 未接回','已配对毛差估算','扣预留后配对估算','状态'],[...cycles].reverse().map(c=>tr([escapeHtml((c.name||c.code||'')+' / '+(c.date||'未知')),format(c.quantity,0)+' × '+priceText(c.sell_price),format(c.buyback_quantity||0,0)+' / '+format(tCycleRemaining(c),0),money(c.paired_gross_estimate),money(c.paired_net_estimate),escapeHtml((c.expired?'历史轮次 · ':'')+(c.status==='closed'?'已结束':c.status==='open'?'未结束':c.status||'待核验')+(c.ledger_sync_required?' · 持仓与现金待同步':''))]))):'<p class="tip">尚无实际T卖出记录；普通风险减仓不会被自动当成做T。</p>';
+ $('t-cycle-list').innerHTML=cycles.length?'<h4>本地T轮次</h4>'+table(['标的 / 日期','实际T卖出','已接回 / 未接回','已配对毛差','已配对净盈亏','状态'],[...cycles].reverse().map(c=>{
+  const closed=c.status==='closed',unmatched=tCycleRemaining(c),reduced=unmatched>0&&(c.status==='cash'||c.expired);
+  const netLabel=c.paired_net_actual!=null?money(c.paired_net_actual)+'（实付费用 '+money(c.paired_fee_actual)+'）':c.paired_net_estimate!=null?money(c.paired_net_estimate)+'（费用待补，含预留估算）':'—';
+  const status=(c.expired?'历史轮次 · ':'')+(closed?'已结束':c.status==='cash'?'余量留现金':c.status==='open'?'未结束':'待核验');
+  const remainder=reduced?'（余量记为减仓'+(c.unmatched_sell_fee_actual!=null?'，分摊费用 '+money(c.unmatched_sell_fee_actual):'')+'）':'';
+  return tr([escapeHtml((c.name||c.code||'')+' / '+(c.date||'未知')),format(c.quantity,0)+' × '+priceText(c.sell_price),format(c.buyback_quantity||0,0)+' / '+format(unmatched,0)+remainder,money(c.paired_gross_estimate),netLabel,escapeHtml(status+(c.ledger_sync_required?' · 持仓与现金待同步':''))]);
+ })):'<p class="tip">尚无实际T卖出记录；普通风险减仓不会被自动当成做T。</p>';
  const holdings=STORE?.config?.positions?STORE.config.positions.filter(p=>Number(p.quantity)>0):rows;
  const securities=holdings.map(p=>[String(p.code),(p.name||p.code)+'（'+p.code+'）']);
  for(const id of ['t-availability-form','t-sell-form'])setTSelectOptions(id,'code',securities,'选择持仓');
@@ -791,13 +819,22 @@ function tInput(form,key,{integer=false,zero=false}={}){
  return n;
 }
 function tCode(form){const code=form.elements.code.value.trim();if(!/^\d{6}$/.test(code))throw Error('请选择6位证券代码');return code;}
+function tOptionalAmount(form,key){
+ const raw=form.elements[key]?.value?.trim();
+ if(!raw)return null;
+ const n=Number(raw);
+ if(!Number.isFinite(n)||n<0)throw Error('费用或费率须为非负数字');
+ return n;
+}
 async function mutateT(event,build){
  event.preventDefault();if(tWriteBusy)return;
  const form=event.target,button=event.submitter;
  try{
   const {path,method,body}=build(form);
   tWriteBusy=true;if(button)button.disabled=true;
-  const d=await api(path,method,body);form.reset();showToast(d.message||'本地做T记录已保存；请同步实际持仓和现金');
+  const d=await api(path,method,body);
+  if(path!=='/api/t-fees')form.reset();
+  showToast(d.message||'本地做T记录已保存；请同步实际持仓和现金');
   await refreshTObserve();
  }catch(e){showToast('做T记录未保存：'+e.message,true);}
  finally{tWriteBusy=false;if(button)button.disabled=false;}
@@ -808,15 +845,21 @@ function saveTAvailability(event){return mutateT(event,form=>{
 });}
 function saveTSell(event){return mutateT(event,form=>{
  if(!form.elements.sell_filled.checked)throw Error('仅可登记已经真实成交的T高抛');
- return {path:'/api/t-cycles',method:'POST',body:{code:tCode(form),quantity:tInput(form,'quantity',{integer:true}),sell_price:tInput(form,'sell_price'),sell_filled:true}};
+ const id=form.elements.broker_fill_id?.value?.trim(),fields=id?{broker_fill_id:id}:{quantity:tInput(form,'quantity',{integer:true}),sell_price:tInput(form,'sell_price'),fee:tOptionalAmount(form,'fee')};
+ return {path:'/api/t-cycles',method:'POST',body:{code:tCode(form),...fields,sell_filled:true}};
 });}
 function saveTBuyback(event){return mutateT(event,form=>{
  if(!form.elements.buy_filled.checked)throw Error('仅可登记已经真实成交的接回');
- const id=form.elements.cycle_id.value,cycle=(T_OBSERVE?.cycles||[]).find(x=>String(x.id)===id&&x.status==='open'&&!x.expired),quantity=tInput(form,'quantity',{integer:true});
+ const id=form.elements.cycle_id.value,cycle=(T_OBSERVE?.cycles||[]).find(x=>String(x.id)===id&&x.status==='open'&&!x.expired);
  if(!cycle)throw Error('先选择已登记实际T卖出的有效轮次');
- if(tCycleRemaining(cycle)===null||quantity>tCycleRemaining(cycle))throw Error('接回数量不能超过本轮尚未接回的实际T卖出量');
- return {path:'/api/t-cycles/'+encodeURIComponent(id)+'/buyback',method:'POST',body:{quantity,price:tInput(form,'price'),buy_filled:true}};
+ const fillId=form.elements.broker_fill_id?.value?.trim(),fields=fillId?{broker_fill_id:fillId}:{quantity:tInput(form,'quantity',{integer:true}),price:tInput(form,'price'),fee:tOptionalAmount(form,'fee')};
+ const remaining=tCycleRemaining(cycle);
+ if(!remaining||(!fillId&&fields.quantity>remaining))throw Error('接回数量不能超过本轮尚未接回的实际T卖出量');
+ return {path:'/api/t-cycles/'+encodeURIComponent(id)+'/buyback',method:'POST',body:{...fields,buy_filled:true}};
 });}
+function saveTFeeTerms(event){return mutateT(event,form=>({
+ path:'/api/t-fees',method:'PUT',body:{kind:form.elements.kind.value,commission_per_10k:tOptionalAmount(form,'commission_per_10k'),minimum_commission:tOptionalAmount(form,'minimum_commission')},
+}));}
 function closeTCycle(event){return mutateT(event,form=>{
  if(!form.elements.leave_cash.checked)throw Error('请确认结束本轮并保留现金');
  const id=form.elements.cycle_id.value,cycle=(T_OBSERVE?.cycles||[]).find(x=>String(x.id)===id&&x.status==='open');
@@ -824,8 +867,9 @@ function closeTCycle(event){return mutateT(event,form=>{
  return {path:'/api/t-cycles/'+encodeURIComponent(id)+'/close',method:'POST',body:{leave_cash:true}};
 });}
 function initTObserve(){
- for(const [id,handler] of [['t-availability-form',saveTAvailability],['t-sell-form',saveTSell],['t-buyback-form',saveTBuyback],['t-close-form',closeTCycle]])$(id)?.addEventListener('submit',handler);
+ for(const [id,handler] of [['t-availability-form',saveTAvailability],['t-sell-form',saveTSell],['t-buyback-form',saveTBuyback],['t-close-form',closeTCycle],['t-fee-form',saveTFeeTerms]])$(id)?.addEventListener('submit',handler);
  $('t-refresh')?.addEventListener('click',refreshTObserve);
+ $('t-fee-form')?.elements?.kind?.addEventListener('change',()=>seedTFeeForm(T_OBSERVE));
  refreshTObserve();setInterval(refreshTObserve,15000);
 }
 

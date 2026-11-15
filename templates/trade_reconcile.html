@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf }}">
+  <title>成交对账 · 衡势</title>
+  <link rel="icon" href="/static/hengshi-logo.svg">
+  <link rel="stylesheet" href="/static/v1_backtest.css">
+  <link rel="stylesheet" href="/static/trade_reconcile.css">
+  <script src="/static/trade_reconcile.js" defer></script>
+</head>
+<body>
+<main class="page">
+  <header class="topbar">
+    <div class="title-group">
+      <img src="/static/hengshi-logo.svg" alt="" width="48" height="48">
+      <div><a class="back-link" href="/">← 衡势研究台</a><h1>成交对账</h1></div>
+    </div>
+    <a href="/alert-journal">提醒记录</a>
+  </header>
+  <p id="status" class="status" role="status">正在读取本地台账…</p>
+  <form id="reconcile-form" hidden>
+    <section class="panel">
+      <div class="section-head"><div><h2>本次新增流水</h2><p>请录入尚未计入当前台账的成交或转账，按发生顺序填写。</p></div></div>
+      <label>录入方式 <select name="mode"><option value="manual">手工录入一笔</option><option value="csv">选择 CSV 文件</option></select></label>
+      <fieldset id="manual" class="form-grid">
+        <p id="alert-context" class="wide subtle" hidden></p>
+        <label>发生时间（北京）<input name="executed_at" type="datetime-local" step="1" required></label>
+        <label>方向<select name="side"><option value="buy">买入</option><option value="sell">卖出</option><option value="deposit">资金转入</option><option value="withdraw">资金转出</option></select></label>
+        <label>成交或流水编号<input name="fill_id" maxlength="80" placeholder="有编号时请填写"></label>
+        <fieldset id="trade-fields" class="form-grid wide">
+          <label>证券代码<input name="code" inputmode="numeric" pattern="[0-9]{6}" required></label>
+          <label>数量<input name="quantity" type="number" min="1" step="1" required></label>
+          <label>实际成交价<input name="price" type="number" min="0.000001" step="0.000001" required></label>
+          <label>实际总费用（元）<input name="fee" type="number" min="0" step="0.01" required></label>
+          <label>证券名称（首次持有）<input name="name" maxlength="36"></label>
+          <label>证券类型<select name="type"><option value="">沿用已知类型</option><option value="stock">股票</option><option value="etf">ETF</option><option value="convertible">可转债</option></select></label>
+          <label>计划参考价（选填）<input name="reference_price" type="number" min="0.000001" step="0.000001"></label>
+          <label>本次退出对应的原计划风险（选填）<input name="planned_risk" type="number" min="0.01" step="0.01"></label>
+        </fieldset>
+        <label id="flow-field" hidden>转账金额（填正数）<input name="amount" type="number" min="0.01" step="0.01" disabled required></label>
+      </fieldset>
+      <fieldset id="csv" hidden disabled>
+        <label>券商流水 CSV<input name="file" type="file" accept=".csv,text/csv" required></label>
+        <p class="subtle">使用 UTF-8。按 <a href="/trade-reconcile/template.csv" download>CSV 模板</a> 整理券商导出的列；每条须有实际编号和时间。</p>
+      </fieldset>
+    </section>
+    <section class="panel">
+      <div class="section-head"><div><h2>券商账户核对</h2><p>按覆盖最后一笔流水的账户页面填入实际可用现金，以及本批变动证券的持仓和可卖数量。</p></div></div>
+      <div class="form-grid">
+        <label>账户时间（北京）<input name="asof" type="datetime-local" step="1" required></label>
+        <label>券商可用现金（元）<input name="available_cash" type="number" min="0" step="0.01" required></label>
+        <label>券商可取资金（选填）<input name="withdrawable_cash" type="number" min="0" step="0.01"></label>
+        <label>券商总资产（选填）<input name="total_assets" type="number" min="0.01" step="0.01"></label>
+      </div>
+      <div id="holdings-wrap" class="table-wrap" hidden>
+        <table><thead><tr><th>证券</th><th>本地／计算持仓</th><th>券商持仓</th><th>券商可卖</th></tr></thead><tbody id="broker-positions"></tbody></table>
+      </div>
+      <p class="subtle">如要用于收盘复盘，可同时核对每只未变动的持仓。部分成交或清仓也按券商显示填写。</p>
+      <button id="preview-button" type="submit">预览对账</button>
+    </section>
+  </form>
+  <section id="preview" class="panel" hidden>
+    <div class="section-head"><div><h2>对账预览</h2><p id="preview-summary"></p></div></div>
+    <ul id="differences" class="limitations" hidden></ul>
+    <div id="preview-rows"></div>
+    <button id="confirm" type="button" hidden>确认更新本地台账</button>
+  </section>
+  <section class="panel">
+    <div class="section-head"><div><h2>最近确认的流水</h2><p>卖出净盈亏按台账单位成本和实际费用估算。计划偏差为相对参考价的金额。</p></div></div>
+    <p id="account-change" class="subtle" hidden></p>
+    <div id="history"></div>
+  </section>
+</main>
+</body>
+</html>
