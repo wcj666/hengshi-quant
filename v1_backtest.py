@@ -15,7 +15,7 @@ import pandas as pd
 from risk_engine import compute
 from strategy_setup import CN, build_setup
 from strategy_v1 import strategy_prefs
-from v1_backtest_data import MINUTE_ENDS, demo_bundle, load_bundle, validate_bundle
+from v1_backtest_data import MINUTE_ENDS, audit_coverage, demo_bundle, load_bundle, validate_bundle
 from v1_backtest_report import save_report, summarize
 
 
@@ -151,12 +151,20 @@ class Replay:
                 self.missing_execution_data.add((self.calendar[index], code))
             return {}
         signal_day = self.calendar[index - 1]
+        universe = self.bundle.get('universe')
+        if universe is not None and signal_day not in universe:
+            day = self.calendar[index]
+            self.note(day, 'UNIVERSE', 'historical_universe_missing', detail='缺少信号日股票池记录')
+            self.missing_execution_data.add((day, 'UNIVERSE'))
+            return {}
+        active_codes = universe[signal_day] if universe is not None else self.symbols
         clock = execution_time(signal_day, '15:05')
         benchmark = self.benchmark.loc[self.benchmark['date'] <= signal_day]
         setups = {}
-        for code, item in self.symbols.items():
+        for code in active_codes:
             if code in self.positions:
                 continue
+            item = self.symbols[code]
             history = self.histories[code]
             prefix = history.loc[history['date'] <= signal_day]
             if len(prefix) < 120 or len(benchmark) < 120 or prefix.iloc[-1]['date'] != signal_day or benchmark.iloc[-1]['date'] != signal_day:
@@ -180,10 +188,6 @@ class Replay:
         item = self.symbols[code]
         review = item['reviews'].get(setup['signal_date'])
         if not review or datetime.fromisoformat(review['recorded_at'].replace('Z', '+00:00')) > now:
-            return None
-        if not all(review.get(key) is True for key in REVIEW_FIELDS):
-            return None
-        if item['type'] == 'etf' and review.get('equity_etf') is not True:
             return None
         return review
 
@@ -245,6 +249,10 @@ class Replay:
         if not review:
             self.note(day, code, 'point_in_time_review_missing', at=at)
             self.missing_execution_data.add((day, code))
+            return False
+        if (not all(review[key] for key in REVIEW_FIELDS)
+                or (kind == 'etf' and not review['equity_etf'])):
+            self.note(day, code, 'point_in_time_review_rejected', at=at)
             return False
         reference = bar['open']
         if not trigger <= reference <= cap:
@@ -445,11 +453,16 @@ def run_backtest(bundle, start, end, initial_cash=100000.0, *, bundle_sha256=Non
     summary['coverage_reasons'] = dict(Counter(d['reason'] for d in simulation.decisions
                                                if (d['date'], d['code']) in simulation.missing_execution_data))
     engine_files = ('v1_backtest.py', 'v1_backtest_data.py', 'v1_backtest_report.py',
-                    'strategy_setup.py', 'strategy_v1.py', 'risk_engine.py', 'trade_levels.py')
+                    'strategy_setup.py', 'strategy_v1.py', 'risk_engine.py', 'trade_levels.py',
+                    'quote_health.py', 'pnl_engine.py')
     return {
         'meta': {
             'engine': PROFILE, 'start': start, 'end': end, 'demo': bundle.get('demo') is True,
             'source': bundle['source'], 'calendar_source': bundle['calendar_source'],
+            'universe_source': bundle.get('universe_source') if 'universe' in bundle else None,
+            'universe_mode': 'dated' if 'universe' in bundle else 'fixed',
+            'input_digests': bundle.get('input_digests', {}),
+            'input_coverage': audit_coverage(bundle, start, end),
             'bundle_sha256': bundle_sha256 or hashlib.sha256(json.dumps(
                 bundle, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest(),
             'engine_sha256': hashlib.sha256(b''.join((ROOT / f).read_bytes() for f in engine_files)).hexdigest(),
@@ -463,6 +476,7 @@ def run_backtest(bundle, start, end, initial_cash=100000.0, *, bundle_sha256=Non
                 '分钟K线无法核实盘口深度或开盘实际排队，分钟参与率为成交量代理。',
                 '原始日线与分钟价统一。持仓遇到未核实公司行动或缺失整场行情时暂停结算。',
                 '样本由数据包限定，需另外验证历史股票池、停牌退市、公告证据和样本外表现。',
+                '历史股票池按信号日读取。固定名单可能存在幸存者偏差。',
                 '净值曲线采用日终估值，策略风险闸门另按分钟开收盘观察。',
             ],
         },
@@ -484,6 +498,7 @@ def main():
     parser.add_argument('--start', help='回放开始交易日 YYYY-MM-DD')
     parser.add_argument('--end', help='回放结束交易日 YYYY-MM-DD')
     parser.add_argument('--initial-cash', type=float, default=100000.0)
+    parser.add_argument('--audit-only', action='store_true', help='只核对输入覆盖，输出JSON，不生成成交')
     parser.add_argument('--output', type=Path, default=ROOT / 'output' / 'v1_backtest')
     args = parser.parse_args()
     try:
@@ -502,6 +517,10 @@ def main():
                 parser.error('历史数据包须指定 --start 和 --end')
             bundle, digest = load_bundle(args.bundle)
             start, end = args.start, args.end
+        if args.audit_only:
+            coverage = audit_coverage(bundle, start, end)
+            print(json.dumps({'bundle_sha256': digest, **coverage}, ensure_ascii=False, indent=2))
+            return
         result = run_backtest(bundle, start, end, args.initial_cash, bundle_sha256=digest)
         save_report(result, args.output)
     except (ValueError, OSError) as exc:

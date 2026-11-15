@@ -1,6 +1,8 @@
 """Validate local inputs for the V1 replay. No network or account access."""
 from __future__ import annotations
 
+from bisect import bisect_right
+from collections import Counter
 from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from hashlib import sha256
@@ -161,7 +163,10 @@ def validate_bundle(value):
         preceding = value
     days = frozenset(calendar)
     _validate_daily(bundle.get("benchmark"), days, "benchmark", require_amount=False)
-    for code, value in _object(bundle.get("securities"), "securities").items():
+    securities = _object(bundle.get("securities"), "securities")
+    if not securities:
+        raise ValueError("securities 缺少回放标的")
+    for code, value in securities.items():
         if not isinstance(code, str) or not re.fullmatch(r"[0-9]{6}", code):
             raise ValueError("证券代码必须是六位数字字符串")
         label = f"securities.{code}"
@@ -178,6 +183,22 @@ def validate_bundle(value):
             if day not in days:
                 raise ValueError(f"{label}.reviews.{day} 不在交易日历")
             _validate_review(review, f"{label}.reviews.{day}", etf=kind == "etf")
+    if "universe" in bundle:
+        _text(bundle.get("universe_source"), "universe_source")
+        for day, codes in _object(bundle["universe"], "universe").items():
+            if day not in days:
+                raise ValueError(f"universe.{day} 不在交易日历")
+            label = f"universe.{day}"
+            listed = _list(codes, label)
+            if any(not isinstance(code, str) or code not in securities for code in listed):
+                raise ValueError(f"{label}包含数据包中不存在的证券")
+            if len(listed) != len(set(listed)):
+                raise ValueError(f"{label}包含重复证券")
+    if "input_digests" in bundle:
+        for name, digest in _object(bundle["input_digests"], "input_digests").items():
+            _text(name, "input_digests 字段名")
+            if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise ValueError(f"input_digests.{name} 必须是 SHA-256")
     return bundle
 
 
@@ -199,6 +220,73 @@ def load_bundle(path):
     raw = Path(path).read_bytes()
     value = json.loads(raw, object_pairs_hook=_unique_object, parse_constant=_reject_constant)
     return validate_bundle(value), sha256(raw).hexdigest()
+
+
+def audit_coverage(bundle, start, end):
+    """Measure input coverage across the declared pool, before any signal filters."""
+    calendar = bundle['calendar']
+    if start not in calendar or end not in calendar or start > end:
+        raise ValueError('覆盖核对范围必须位于数据包交易日历内')
+    start_index, end_index = calendar.index(start), calendar.index(end)
+    securities = bundle['securities']
+    universe = bundle.get('universe')
+
+    def completed_days(rows):
+        return [row['date'] for row in rows if row.get('complete', True)]
+
+    benchmark_days = completed_days(bundle['benchmark'])
+    histories = {code: completed_days(item['daily']) for code, item in securities.items()}
+
+    def ready(dates, prior_day):
+        if prior_day is None:
+            return False
+        count = bisect_right(dates, prior_day)
+        return count >= 120 and dates[count - 1] == prior_day
+
+    counts, examples = Counter(), []
+
+    def issue(reason, day, code=None):
+        counts[reason] += 1
+        if len(examples) < 24:
+            examples.append({'date': day, 'code': code, 'reason': reason})
+
+    for index in range(start_index, end_index + 1):
+        day = calendar[index]
+        prior_day = calendar[index - 1] if index > 0 else None
+        if not ready(benchmark_days, prior_day):
+            issue('benchmark_unready_days', day)
+        if universe is not None and prior_day not in universe:
+            issue('universe_missing_days', day)
+            continue
+        active = securities if universe is None else universe[prior_day]
+        for code in active:
+            counts['symbol_sessions'] += 1
+            if not ready(histories[code], prior_day):
+                issue('daily_unready_sessions', day, code)
+            session = securities[code]['sessions'].get(day)
+            if not session:
+                issue('missing_sessions', day, code)
+            elif not session['corporate_action_clear']:
+                issue('corporate_action_unverified_sessions', day, code)
+            elif session['status'] == 'suspended':
+                counts['suspended_sessions'] += 1
+            elif len(session['minutes']) != len(MINUTE_ENDS):
+                issue('partial_minute_sessions', day, code)
+            else:
+                counts['complete_minutes_sessions'] += 1
+    keys = (
+        'symbol_sessions', 'complete_minutes_sessions', 'suspended_sessions', 'missing_sessions',
+        'partial_minute_sessions', 'corporate_action_unverified_sessions', 'daily_unready_sessions',
+        'benchmark_unready_days', 'universe_missing_days',
+    )
+    return {
+        'start': start, 'end': end, 'demo': bundle.get('demo') is True,
+        'source': bundle['source'], 'calendar_source': bundle['calendar_source'],
+        'trading_days': end_index - start_index + 1,
+        'universe_mode': 'dated' if universe is not None else 'fixed',
+        **{key: counts[key] for key in keys},
+        'examples': examples,
+    }
 
 
 def _demo_session(previous_close, opening, steps):

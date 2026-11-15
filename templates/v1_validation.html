@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>回测区间对照 · 衡势</title>
+  <link rel="icon" href="/static/hengshi-logo.svg">
+  <link rel="stylesheet" href="/static/v1_backtest.css">
+  <script src="/static/v1_validation.js" defer></script>
+</head>
+<body>
+<main class="page">
+  <header class="topbar">
+    <div class="title-group">
+      <img src="/static/hengshi-logo.svg" alt="" width="48" height="48">
+      <div><a class="back-link" href="/backtest">← V1 逐笔回测</a><h1>回测区间对照</h1></div>
+    </div>
+    <button id="refresh" type="button">刷新报告</button>
+  </header>
+  <p id="status" class="status" role="status">正在读取区间对照…</p>
+  <section id="report" hidden>
+    <div class="run-header">
+      <p id="source" class="sample-range"></p>
+      <p id="sample" class="sample-type"></p>
+    </div>
+    <section class="panel" aria-labelledby="results-title">
+      <div class="section-head">
+        <div><h2 id="results-title">分段结果</h2><p id="initial-cash"></p></div>
+        <a href="/backtest/validation/download">下载对照 JSON</a>
+      </div>
+      <div class="table-wrap" tabindex="0" aria-label="回测分段结果">
+        <table>
+          <thead><tr><th>阶段</th><th>日期</th><th>交易日</th><th>已结束交易</th><th>期末未平仓</th><th>净盈亏</th><th>净收益率</th><th>平均净 R</th><th>最大日终回撤</th></tr></thead>
+          <tbody id="results"></tbody>
+        </table>
+      </div>
+      <ul id="warnings" class="limitations"></ul>
+    </section>
+    <section class="panel" aria-labelledby="coverage-title">
+      <div class="section-head">
+        <div><h2 id="coverage-title">历史数据覆盖</h2><p>按信号日证券名单核对下一交易日的数据。数值来自导入的数据包。</p></div>
+      </div>
+      <div class="table-wrap" tabindex="0" aria-label="回测输入覆盖">
+        <table>
+          <thead><tr><th>阶段</th><th>应核对</th><th>分钟完整</th><th>停牌</th><th>缺整日</th><th>缺部分分钟</th><th>公司行动待核验</th><th>标的日线不足</th><th>基准日线不足</th><th>缺历史名单</th></tr></thead>
+          <tbody id="coverage"></tbody>
+        </table>
+      </div>
+      <ul id="period-warnings" class="limitations"></ul>
+    </section>
+    <section class="panel" aria-labelledby="evidence-title">
+      <div class="section-head"><h2 id="evidence-title">复核指纹</h2></div>
+      <dl id="evidence" class="provenance"></dl>
+    </section>
+  </section>
+</main>
+</body>
+</html>

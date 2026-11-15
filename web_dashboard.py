@@ -46,6 +46,7 @@ JOB = {'running':False,'message':'尚未在本次网页会话启动扫描','star
 ALLOWED_MODES = {'live','demo'}
 MARKET_CODE = re.compile(r'^(?:00|30|60)\d{4}$')
 ETF_CODE = re.compile(r'^(?:15|51|56|58)\d{4}$')
+BACKTEST_FILES = frozenset(('result.json', 'fills.csv', 'closed_trades.csv', 'equity_curve.csv', 'decisions.csv'))
 
 
 def clean_number(x, lower=None, upper=None, integer=False):
@@ -223,11 +224,42 @@ def create_app(folder:Path=ROOT):
 
     @app.route('/backtest/download/<name>')
     def download_backtest(name):
-        if name not in ('result.json', 'fills.csv', 'closed_trades.csv', 'equity_curve.csv', 'decisions.csv'):
+        if name not in BACKTEST_FILES:
             return jsonify(error='未知回测文件'), 404
         path = output / 'v1_backtest' / name
         if not path.is_file():
             return jsonify(error='尚未生成该回测文件'), 404
+        return send_file(path, as_attachment=True)
+
+    @app.route('/backtest/validation')
+    def backtest_validation_page():
+        return render_template('v1_validation.html')
+
+    @app.route('/api/backtest/validation')
+    def backtest_validation_report():
+        path = output / 'v1_validation' / 'comparison.json'
+        if not path.is_file():
+            return jsonify(error='尚未生成区间对照报告。'), 404
+        report = strategy.read(path)
+        if not isinstance(report, dict) or not isinstance(report.get('meta'), dict) or not isinstance(report.get('periods'), list):
+            return jsonify(error='区间对照报告损坏，请重新生成。'), 409
+        return jsonify(report)
+
+    @app.route('/backtest/validation/download')
+    def download_backtest_comparison():
+        path = output / 'v1_validation' / 'comparison.json'
+        if not path.is_file():
+            return jsonify(error='尚未生成区间对照报告。'), 404
+        return send_file(path, as_attachment=True)
+
+    @app.route('/backtest/validation/download/<run_id>/<period>/<name>')
+    def download_backtest_period(run_id, period, name):
+        if (not re.fullmatch(r'[0-9a-f]{32}', run_id)
+                or period not in ('development', 'validation', 'holdout') or name not in BACKTEST_FILES):
+            return jsonify(error='未知区间报告文件。'), 404
+        path = output / 'v1_validation' / 'runs' / run_id / period / name
+        if not path.is_file():
+            return jsonify(error='尚未生成该区间报告文件。'), 404
         return send_file(path, as_attachment=True)
 
     @app.route('/paper-contest')

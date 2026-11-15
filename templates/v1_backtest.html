@@ -15,7 +15,10 @@
       <img src="/static/hengshi-logo.svg" alt="" width="48" height="48">
       <div><a class="back-link" href="/">← 衡势研究台</a><h1>V1 回测报告</h1></div>
     </div>
-    <button id="refresh" type="button">刷新报告</button>
+    <nav class="toolbar" aria-label="回测工具">
+      <a href="/backtest/validation">区间对照</a>
+      <button id="refresh" type="button">刷新报告</button>
+    </nav>
   </header>
 
   <p id="status" class="status" role="status">正在读取最近一次回测…</p>
@@ -33,6 +36,11 @@
       <p id="sample-type" class="sample-type"></p>
     </div>
     <dl id="metrics" class="metrics" aria-label="回测概况"></dl>
+
+    <section id="coverage" class="panel" hidden aria-labelledby="coverage-title">
+      <div class="section-head"><div><h2 id="coverage-title">历史输入覆盖</h2><p id="coverage-summary"></p></div></div>
+      <ul id="coverage-issues" class="reason-list"></ul>
+    </section>
 
     <section class="panel" aria-labelledby="equity-title">
       <div class="section-head">

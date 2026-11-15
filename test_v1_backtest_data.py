@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from strategy_setup import build_setup
-from v1_backtest_data import MINUTE_ENDS, demo_bundle, load_bundle, validate_bundle
+from v1_backtest_data import MINUTE_ENDS, audit_coverage, demo_bundle, load_bundle, validate_bundle
 
 
 class BacktestInputTests(unittest.TestCase):
@@ -35,6 +35,23 @@ class BacktestInputTests(unittest.TestCase):
         self.assertIs(validate_bundle(bundle), bundle)
         self.assertNotIn("2024-06-18", sessions)
         self.assertEqual(len(sessions["2024-06-17"]["minutes"]), 239)
+
+    def test_audit_counts_input_gaps_before_any_signal_filters(self):
+        bundle = demo_bundle()
+        security = bundle["securities"]["600000"]
+        security["sessions"]["2024-06-17"]["minutes"].pop()
+        del security["sessions"]["2024-06-18"]
+        bundle["benchmark"][-3]["complete"] = False
+        bundle.update(
+            universe_source="合成名单",
+            universe={"2024-06-14": ["600000"], "2024-06-17": ["600000"]},
+        )
+        counts = audit_coverage(validate_bundle(bundle), "2024-06-17", "2024-06-19")
+        for key, expected in {
+            "trading_days": 3, "symbol_sessions": 2, "partial_minute_sessions": 1,
+            "missing_sessions": 1, "universe_missing_days": 1, "benchmark_unready_days": 1,
+        }.items():
+            self.assertEqual(counts[key], expected, key)
 
     def test_rejects_malformed_candles_reviews_and_execution_limits(self):
         changes = (

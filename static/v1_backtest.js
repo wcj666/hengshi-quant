@@ -19,7 +19,9 @@ const reasons = {
   take_profit_1: '第一止盈',
   take_profit_2: '第二止盈',
   signal_data_missing: '信号日线缺失',
+  historical_universe_missing: '信号日股票池缺失',
   point_in_time_review_missing: '当时的人工核验缺失',
+  point_in_time_review_rejected: '当时的人工核验未通过',
   open_above_cap: '当日开盘超限',
   entry_outside_range: '入场价超出触发区间',
   entry_price_limit: '触及买入价格限制',
@@ -242,6 +244,20 @@ function renderReport(report) {
   const incomplete = summary.execution_coverage_complete === false;
   const missingValuations = summary.valuations_complete === false;
   const messages = [];
+  const coverage = meta.input_coverage;
+  byId('coverage').hidden = !coverage;
+  if (coverage) {
+    const checks = [
+      ['缺整日行情', coverage.missing_sessions], ['分钟缺口', coverage.partial_minute_sessions],
+      ['公司行动待核验', coverage.corporate_action_unverified_sessions], ['标的日线不足', coverage.daily_unready_sessions],
+      ['基准日线不足', coverage.benchmark_unready_days], ['缺历史名单', coverage.universe_missing_days],
+    ].filter(([, count]) => count > 0);
+    byId('coverage-summary').textContent =
+      `${integer(coverage.symbol_sessions)} 个证券交易日 · ${integer(coverage.complete_minutes_sessions)} 个分钟完整 · ` +
+      `${integer(coverage.suspended_sessions)} 个有停牌记录 · ${coverage.universe_mode === 'dated' ? '按信号日名单' : '使用固定名单'}`;
+    byId('coverage-issues').replaceChildren(...checks.map(([label, count]) => node('li', `${label} · ${integer(count)}`)));
+    if (checks.length) messages.push('历史输入覆盖存在缺口，见下方核对结果。');
+  }
   if (meta.demo === true) messages.push('合成样本用于检查规则与成交逻辑，收益仅反映演示路径。');
   if (meta.halted) {
     const { date, code, reason } = meta.halted;

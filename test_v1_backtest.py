@@ -69,6 +69,37 @@ class ReplayTests(TestCase):
         self.assertFalse(result['summary']['execution_coverage_complete'])
         self.assertIn('point_in_time_review_missing', {d['reason'] for d in result['decisions']})
 
+    def test_negative_archived_review_is_a_rejection_not_a_coverage_gap(self):
+        bundle = demo_bundle()
+        bundle['securities'][INDEX]['reviews']['2024-06-14']['fundamentals_ok'] = False
+        result = run_backtest(bundle, START, START)
+        self.assertEqual(result['fills'], [])
+        self.assertTrue(result['summary']['execution_coverage_complete'])
+        self.assertIn('point_in_time_review_rejected', {d['reason'] for d in result['decisions']})
+
+    def test_dated_universe_uses_signal_day_and_exits_after_removal(self):
+        bundle = demo_bundle()
+        bundle.update(
+            universe_source='合成名单',
+            universe={'2024-06-14': [INDEX], START: [], SECOND: []},
+        )
+        result = run_backtest(bundle, START, END)
+        self.assertEqual([f['reason'] for f in result['fills']],
+                         ['breakout', 'take_profit_1', 'take_profit_2'])
+        self.assertTrue(result['summary']['execution_coverage_complete'])
+        self.assertEqual(result['meta']['input_coverage']['symbol_sessions'], 1)
+
+        del bundle['universe']['2024-06-14']
+        result = run_backtest(bundle, START, START)
+        self.assertEqual(result['fills'], [])
+        self.assertFalse(result['summary']['execution_coverage_complete'])
+        self.assertEqual(result['decisions'][0]['reason'], 'historical_universe_missing')
+
+        bundle['universe']['2024-06-14'] = []
+        result = run_backtest(bundle, START, START)
+        self.assertEqual(result['fills'], [])
+        self.assertTrue(result['summary']['execution_coverage_complete'])
+
     def test_gap_above_cap_cancels_the_session_even_after_retrace(self):
         bundle = demo_bundle()
         session(bundle, START)['open'] = 11.70
@@ -102,6 +133,29 @@ class ReplayTests(TestCase):
                 self.assertEqual(download.status_code, 200)
             self.assertEqual(client.get('/backtest/download/config.json').status_code, 404)
             self.assertFalse((root / 'config.json').exists())
+
+    def test_validation_dashboard_reads_only_comparison(self):
+        from web_dashboard import create_app
+        from strategy_runtime import write
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            client = create_app(root).test_client()
+            self.assertIn(b'/backtest/validation', client.get('/backtest').data)
+            self.assertEqual(client.get('/backtest/validation').status_code, 200)
+            self.assertEqual(client.get('/api/backtest/validation').status_code, 404)
+            path = root / 'output' / 'v1_validation' / 'comparison.json'
+            write(path, {'meta': {'demo': True}, 'periods': []})
+            self.assertTrue(client.get('/api/backtest/validation').json['meta']['demo'])
+            with client.get('/backtest/validation/download') as comparison:
+                self.assertIn('comparison.json', comparison.headers['Content-Disposition'])
+            run_id = 'a' * 32
+            write(path.parent / 'runs' / run_id / 'holdout' / 'result.json', {'fills': []})
+            route = f'/backtest/validation/download/{run_id}/holdout'
+            with client.get(f'{route}/result.json') as download:
+                self.assertEqual(download.status_code, 200)
+            self.assertEqual(client.get(f'{route}/config.json').status_code, 404)
+            path.write_text('{')
+            self.assertEqual(client.get('/api/backtest/validation').status_code, 409)
 
 
 if __name__ == '__main__':

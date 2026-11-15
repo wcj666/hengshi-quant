@@ -14,7 +14,9 @@ if [[ ! -x "$PY" ]]; then
   PY="$FOUND_PYTHON"
 fi
 RESULT=0
-for t in test_v1_backtest_data.py test_v1_backtest_report.py test_v1_backtest.py test_close_review.py test_paper_runtime.py test_paper_view.py test_paper_contest.py test_asset_history_tencent.py test_close_refresh.py test_suggested_exit.py test_suggested_exit_api.py test_suggested_ui.py test_t_quotes.py test_t_engine.py test_t_runtime.py test_t_ui.py test_price_first.py test_csrf_recovery.py test_strategy_runtime.py test_strategy_risk.py test_strategy_setup.py test_strategy_ui.py test_phase2_strategy.py test_swing_analysis.py test_account_snapshot.py test_tencent_quotes.py test_rule_guards.py test_v361.py test_v360.py test_chan_daily.py test_chan_history.py test_chan_plain.py test_intraday.py test_market_context.py test_pnl.py test_poll_cadence.py test_portfolio_quotes.py test_technical_engine.py test_trade_signals.py; do
+for t in test_v1_backtest_data.py test_v1_backtest_report.py test_v1_backtest.py \
+  test_v1_validation.py test_v1_history_import.py test_v1_tencent_archive.py \
+  test_close_review.py test_paper_runtime.py test_paper_view.py test_paper_contest.py test_asset_history_tencent.py test_close_refresh.py test_suggested_exit.py test_suggested_exit_api.py test_suggested_ui.py test_t_quotes.py test_t_engine.py test_t_runtime.py test_t_ui.py test_price_first.py test_csrf_recovery.py test_strategy_runtime.py test_strategy_risk.py test_strategy_setup.py test_strategy_ui.py test_phase2_strategy.py test_swing_analysis.py test_account_snapshot.py test_tencent_quotes.py test_rule_guards.py test_v361.py test_v360.py test_chan_daily.py test_chan_history.py test_chan_plain.py test_intraday.py test_market_context.py test_pnl.py test_poll_cadence.py test_portfolio_quotes.py test_technical_engine.py test_trade_signals.py; do
   printf '\n--- %s ---\n' "$t"
   "$PY" "$t" || RESULT=1
 done
