@@ -1,0 +1,108 @@
+"""Deterministic V1 replay and dashboard entry points."""
+from copy import deepcopy
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest import TestCase, main
+
+from v1_backtest import run_backtest
+from v1_backtest_data import demo_bundle
+from v1_backtest_report import save_report
+
+INDEX = '600000'
+START, SECOND, END = '2024-06-17', '2024-06-18', '2024-06-19'
+
+
+def session(bundle, day):
+    return bundle['securities'][INDEX]['sessions'][day]
+
+
+class ReplayTests(TestCase):
+    def test_exit_fills_and_costs_reconcile(self):
+        result = run_backtest(demo_bundle(), START, END)
+        fills, summary = result['fills'], result['summary']
+        self.assertEqual([f['reason'] for f in fills], ['breakout', 'take_profit_1', 'take_profit_2'])
+        self.assertEqual([f['date'] for f in fills], [START, SECOND, END])
+        self.assertEqual(fills[0]['price_bar_end'], '09:46')
+        self.assertLessEqual(fills[0]['price'], fills[0]['entry_cap'])
+        self.assertEqual(sum(f['quantity'] for f in fills[1:]), fills[0]['quantity'])
+        self.assertEqual(round(sum(f['fees'] for f in fills), 2), summary['fee_total'])
+        net = round(sum(f['notional'] if f['side'] == 'sell' else -f['notional'] for f in fills)
+                    - summary['fee_total'], 2)
+        self.assertEqual(net, summary['net_pnl'])
+        self.assertEqual(net, result['closed_trades'][0]['net_pnl'])
+        self.assertLessEqual(result['closed_trades'][0]['initial_risk'], 150)
+        self.assertTrue(summary['execution_coverage_complete'])
+
+    def test_future_daily_close_cannot_change_the_previous_fill(self):
+        bundle = demo_bundle()
+        base = run_backtest(bundle, START, START)
+        altered = deepcopy(bundle)
+        for series in (altered['benchmark'], altered['securities'][INDEX]['daily']):
+            for bar in series:
+                if bar['date'] > '2024-06-14':
+                    for field in ('open', 'high', 'low', 'close'):
+                        bar[field] *= 2
+        trial = run_backtest(altered, START, START)
+        self.assertEqual(base['fills'], trial['fills'])
+
+    def test_t_plus_one_and_limit_down_keep_triggered_stop_pending(self):
+        bundle = demo_bundle()
+        buy_day = session(bundle, START)
+        row = next(bar for bar in buy_day['minutes'] if bar['time'] == '10:00')
+        row['low'] = 11.10
+        sell_day = session(bundle, SECOND)
+        lower = sell_day['lower_limit']
+        sell_day['open'] = lower
+        for bar in sell_day['minutes']:
+            bar.update(open=lower, high=lower, low=lower, close=lower)
+        result = run_backtest(bundle, START, SECOND)
+        self.assertEqual([f['side'] for f in result['fills']], ['buy'])
+        self.assertTrue(result['open_positions'][0]['stop_pending'])
+        self.assertTrue({'t_plus_one', 'exit_price_limit'}.issubset(d['reason'] for d in result['decisions']))
+
+    def test_future_review_cannot_authorize_earlier_entry(self):
+        bundle = demo_bundle()
+        review = bundle['securities'][INDEX]['reviews']['2024-06-14']
+        review['recorded_at'] = START + 'T15:05:00+08:00'
+        result = run_backtest(bundle, START, START)
+        self.assertEqual(result['fills'], [])
+        self.assertFalse(result['summary']['execution_coverage_complete'])
+        self.assertIn('point_in_time_review_missing', {d['reason'] for d in result['decisions']})
+
+    def test_gap_above_cap_cancels_the_session_even_after_retrace(self):
+        bundle = demo_bundle()
+        session(bundle, START)['open'] = 11.70
+        result = run_backtest(bundle, START, START)
+        self.assertEqual(result['fills'], [])
+        self.assertEqual(result['decisions'][0]['reason'], 'open_above_cap')
+
+    def test_missing_minute_and_missing_held_session_are_explicit(self):
+        bundle = demo_bundle()
+        session(bundle, START)['minutes'].pop(0)
+        result = run_backtest(bundle, START, START)
+        self.assertEqual(result['fills'], [])
+        self.assertFalse(result['summary']['execution_coverage_complete'])
+        bundle = demo_bundle()
+        del bundle['securities'][INDEX]['sessions'][SECOND]
+        result = run_backtest(bundle, START, END)
+        self.assertEqual(result['meta']['halted']['date'], SECOND)
+        self.assertIsNone(result['summary']['end_equity'])
+        self.assertIsNone(result['summary']['max_drawdown'])
+
+    def test_backtest_page_reads_only_private_reports(self):
+        from web_dashboard import create_app
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            client = create_app(root).test_client()
+            self.assertEqual(client.get('/api/backtest').status_code, 404)
+            save_report(run_backtest(demo_bundle(), START, END), root / 'output' / 'v1_backtest')
+            self.assertEqual(client.get('/backtest').status_code, 200)
+            self.assertTrue(client.get('/api/backtest').json['meta']['demo'])
+            with client.get('/backtest/download/equity_curve.csv') as download:
+                self.assertEqual(download.status_code, 200)
+            self.assertEqual(client.get('/backtest/download/config.json').status_code, 404)
+            self.assertFalse((root / 'config.json').exists())
+
+
+if __name__ == '__main__':
+    main()

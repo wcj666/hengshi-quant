@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>V1 回测报告 · 衡势</title>
+  <link rel="icon" href="/static/hengshi-logo.svg">
+  <link rel="stylesheet" href="/static/v1_backtest.css">
+  <script src="/static/v1_backtest.js" defer></script>
+</head>
+<body>
+<main class="page">
+  <header class="topbar">
+    <div class="title-group">
+      <img src="/static/hengshi-logo.svg" alt="" width="48" height="48">
+      <div><a class="back-link" href="/">← 衡势研究台</a><h1>V1 回测报告</h1></div>
+    </div>
+    <button id="refresh" type="button">刷新报告</button>
+  </header>
+
+  <p id="status" class="status" role="status">正在读取最近一次回测…</p>
+  <section id="empty-help" class="panel" hidden>
+    <h2>生成报告</h2>
+    <p>在项目目录运行以下命令，将合成样本报告写入已安装的衡势，再刷新此页。</p>
+    <pre><code>app="$HOME/Library/Application Support/AshareAB/app"
+"$app/.venv/bin/python" v1_backtest.py --demo --output "$app/output/v1_backtest"</code></pre>
+    <p>导入真实历史数据时，用 <code>--bundle</code> 指定数据包，并用 <code>--start</code> 和 <code>--end</code> 指定交易日范围。</p>
+  </section>
+
+  <div id="report" hidden>
+    <div class="run-header">
+      <p id="sample-range" class="sample-range"></p>
+      <p id="sample-type" class="sample-type"></p>
+    </div>
+    <dl id="metrics" class="metrics" aria-label="回测概况"></dl>
+
+    <section class="panel" aria-labelledby="equity-title">
+      <div class="section-head">
+        <div><h2 id="equity-title">日终净值</h2><p>包含未平仓头寸的日终估值。缺失估值的日期会在图上断开。</p></div>
+        <a href="/backtest/download/equity_curve.csv">下载净值 CSV</a>
+      </div>
+      <div id="equity-chart" hidden>
+        <canvas id="equity-plot" aria-hidden="true"></canvas>
+        <div class="equity-control">
+          <label for="equity-day">查看交易日</label>
+          <input id="equity-day" type="range" min="0" max="0" value="0" step="1">
+          <output id="equity-readout" for="equity-day"></output>
+        </div>
+      </div>
+      <p id="equity-empty" class="empty" hidden>没有可绘制的净值估值。仍可下载各交易日的记录。</p>
+    </section>
+
+    <section class="panel" aria-labelledby="comparison-title">
+      <div class="section-head"><div><h2 id="comparison-title">股票与 ETF</h2><p>两类证券共用组合资金。已实现盈亏、胜率和净 R 按已结束交易统计。</p></div></div>
+      <div class="table-wrap" tabindex="0" aria-label="股票与ETF统计">
+        <table><thead><tr><th>品种</th><th>成交笔数</th><th>已结束交易</th><th>实现净盈亏</th><th>胜率</th><th>平均净 R</th><th>费用</th></tr></thead><tbody id="asset-stats"></tbody></table>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="fills-title">
+      <div class="section-head">
+        <div><h2 id="fills-title">逐笔成交</h2><p id="fill-count"></p></div>
+        <a href="/backtest/download/fills.csv">下载成交 CSV</a>
+      </div>
+      <div class="table-wrap" tabindex="0" aria-label="逐笔成交明细">
+        <table><thead><tr><th>时间（北京）</th><th>证券</th><th>方向</th><th>数量</th><th>成交价</th><th>成交额</th><th>费用</th><th>滑点估算</th><th>初始风险</th><th>原因</th></tr></thead><tbody id="fills"></tbody></table>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="closed-title">
+      <div class="section-head">
+        <div><h2 id="closed-title">已结束交易</h2><p>净 R 是扣除费用后的净盈亏除以初始风险。</p></div>
+        <a href="/backtest/download/closed_trades.csv">下载结算 CSV</a>
+      </div>
+      <div class="table-wrap" tabindex="0" aria-label="已结束交易明细">
+        <table><thead><tr><th>证券</th><th>开仓日</th><th>结束日</th><th>毛盈亏<span>含滑点</span></th><th>净盈亏<span>含费用</span></th><th>初始风险</th><th>净 R</th><th>退出原因</th></tr></thead><tbody id="closed-trades"></tbody></table>
+      </div>
+      <p id="open-positions" class="subtle" hidden></p>
+    </section>
+
+    <section class="panel" aria-labelledby="decisions-title">
+      <div class="section-head">
+        <div><h2 id="decisions-title">未成交与数据检查</h2><p id="decision-count"></p></div>
+        <a href="/backtest/download/decisions.csv">下载检查 CSV</a>
+      </div>
+      <ul id="rejection-counts" class="reason-list" aria-label="原因计数" hidden></ul>
+      <div class="table-wrap" tabindex="0" aria-label="未成交与数据检查明细">
+        <table><thead><tr><th>时间（北京）</th><th>证券</th><th>原因</th><th>详情</th></tr></thead><tbody id="decisions"></tbody></table>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="sources-title">
+      <div class="section-head"><div><h2 id="sources-title">数据与撮合口径</h2></div><a href="/backtest/download/result.json">下载完整 JSON</a></div>
+      <dl id="provenance" class="provenance"></dl>
+      <p id="execution-model" class="execution-model"></p>
+      <ul id="limitations" class="limitations"></ul>
+    </section>
+  </div>
+</main>
+</body>
+</html>

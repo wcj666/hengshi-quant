@@ -207,6 +207,29 @@ def create_app(folder:Path=ROOT):
     @app.route('/')
     def index(): return render_template('dashboard.html',csrf=CSRF)
 
+    @app.route('/backtest')
+    def backtest_page():
+        return render_template('v1_backtest.html')
+
+    @app.route('/api/backtest')
+    def backtest_data():
+        path = output / 'v1_backtest' / 'result.json'
+        if not path.is_file():
+            return jsonify(error='尚未生成回测报告。请先在项目目录运行合成样例或导入历史数据包。'), 404
+        records = strategy.read(path)
+        if not isinstance(records, dict) or not isinstance(records.get('summary'), dict):
+            return jsonify(error='回测报告损坏，请重新生成。'), 409
+        return jsonify(records)
+
+    @app.route('/backtest/download/<name>')
+    def download_backtest(name):
+        if name not in ('result.json', 'fills.csv', 'closed_trades.csv', 'equity_curve.csv', 'decisions.csv'):
+            return jsonify(error='未知回测文件'), 404
+        path = output / 'v1_backtest' / name
+        if not path.is_file():
+            return jsonify(error='尚未生成该回测文件'), 404
+        return send_file(path, as_attachment=True)
+
     @app.route('/paper-contest')
     def paper_contest_page():
         return render_template('paper_contest.html')
