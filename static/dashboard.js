@@ -771,7 +771,8 @@ function renderTObserve(data){
  if(!active)discardTPopups();
  const status=typeof d.status==='string'?d.status:'等待分时行情与成交记录核验';
  $('t-status').textContent=status+(d.asof?' · 数据截至 '+d.asof:'')+(active?'':'；当前不可用于实时做T');
- $('t-count').textContent=!d.enabled?'做T观察未启用':d.stale?'数据待更新':rows.length+'只持仓观察';
+ const ready=active?rows.filter(r=>r.tradable===true).length:0;
+ $('t-count').textContent=!d.enabled?'做T观察未启用':d.stale?'暂停实时提示':`${rows.length}只持仓 · ${ready}只条件通过`;
  $('t-count').className='pill '+(active?'':'muted');
  $('t-settings').textContent=`先卖后买 · 每只每天最多 1 轮 · 风控费用滑点至少预留 ${money(Math.max(20,Number(d.settings?.fee_reserve)||20))}。保本价差按确认数量测算，盘中提示另有风控门槛。`;
  const feeSummary=$('t-fee-model-summary');
@@ -783,15 +784,19 @@ function renderTObserve(data){
   const net=active?row.net_spread_estimate:null,gross=active?row.gross_spread_estimate:null;
   const modeled=active&&Number.isFinite(row.break_even_gap);
   const basis=(row.fee_basis||[]), feeLabel=basis.includes('reserve')?'含费用预留':basis.includes('comparable_fills')?'含相近实付样本':'按设置及已知费用';
-  return `<article class="t-observation-card ${active&&blockers.length?'blocked':''}"><div class="signal-card-head"><strong>${escapeHtml(row.name||row.code)}（${escapeHtml(row.code)}）</strong><span class="signal-tag">${escapeHtml(active?tPhaseLabel(row.phase):'历史/待更新')}</span></div>
-  <p>${escapeHtml(active?(row.reason||row.status||'等待后端条件核验'):'数据过期或观察未启用，不沿用旧价位作为实时做T条件。')}</p>
-  <div class="t-price-grid"><div><span>最新参考</span><b>${priceText(price)}</b></div><div><span>分时均价</span><b>${priceText(active?row.vwap:null)}</b></div><div><span>高抛观察</span><b>${priceText(active?row.target_sell:null)}</b></div><div><span>接回观察</span><b>${priceText(active?row.target_buy:null)}</b></div></div>
-  <div class="signal-fields"><span>核验数量 <strong>${quantity===null?'—（待核验）':format(quantity,0)}</strong></span><span>毛价差估算 <strong>${money(gross)}</strong></span><span>预估往返费用 <strong>${money(active?row.estimated_roundtrip_fee:null)}</strong></span><span>扣费后估算 <strong>${money(net)}</strong></span></div>
+  const checks=active?(row.checks||[]):[];
+  const checklist=checks.length?'<ul class="t-checklist">'+checks.map(c=>`<li class="${c.passed===true?'pass':'pending'}"><strong>${c.passed===true?'已通过':c.passed===false?'未通过':'待核验'} · ${escapeHtml(c.label)}</strong><span>${escapeHtml(c.detail)}</span></li>`).join('')+'</ul>':'';
+  return `<article class="t-observation-card ${active&&blockers.length?'blocked':''}"><div class="signal-card-head"><strong>${escapeHtml(row.name||row.code)}（${escapeHtml(row.code)}）</strong><span class="signal-tag">${escapeHtml(active?(row.status||tPhaseLabel(row.phase)):'历史/待更新')}</span></div>
+  <p>${escapeHtml(active?(row.reason||row.status||'等待后端条件核验'):'休市、数据过期或观察未启用，不沿用旧价位作为实时做T条件。'+(row.last_status?' 上轮状态：'+row.last_status:''))}</p>
+  <div class="t-price-grid"><div><span>最新参考</span><b>${priceText(price)}</b></div><div><span>分时均价</span><b>${priceText(active?row.vwap:null)}</b></div><div><span>${row.phase==='sell_ready'?'高抛参考':'高抛观察门槛'}</span><b>${priceText(active?row.target_sell:null)}</b></div><div><span>${row.cycle_id?'接回观察上限':'实际T卖出后才看接回'}</span><b>${priceText(active&&row.cycle_id?row.target_buy:null)}</b></div></div>
+  <div class="signal-fields"><span>条件通过的T数量 <strong>${quantity===null?'—（待核验）':format(quantity,0)}</strong></span><span>假设回落的毛价差 <strong>${money(gross)}</strong></span><span>预估往返费用 <strong>${money(active?row.estimated_roundtrip_fee:null)}</strong></span><span>扣费后估算（未扣额外滑点） <strong>${money(net)}</strong></span></div>
+  ${active?`<div class="signal-fields"><span>已记录可卖 <strong>${row.available_quantity==null?'待核验':format(row.available_quantity,0)+'份'}</strong></span><span>T测算上限（非委托量） <strong>${row.t_capacity==null?'待核验':format(row.t_capacity,0)+'份'}</strong></span></div>`:''}
+  ${checklist}
   ${modeled?`<div class="signal-fields"><span>${format(row.break_even_quantity,0)} 股／份保本价差 <strong>${format(row.break_even_gap,4)} 元／股或份</strong></span><span>估算保本回补价上限 <strong>${priceText(row.break_even_buy_price)}</strong></span><span>${feeLabel}</span></div>`:''}
-  ${blockers.length?'<ul class="t-blockers">'+blockers.map(x=>`<li>${escapeHtml(x)}</li>`).join('')+'</ul>':''}<small>参考区间不是委托；跌了不等于该接回，卖出也不保证能接回。${row.cycle_id?'本轮 '+escapeHtml(row.cycle_id):'尚无本轮实际T卖出记录时，不提供接回任务。'}</small></article>`;
+  ${blockers.length&&!checks.length?'<ul class="t-blockers">'+blockers.map(x=>`<li>${escapeHtml(x)}</li>`).join('')+'</ul>':''}<small>${active?'报价时间 '+escapeHtml(row.quote_asof||'待核验')+' · 完整分钟截至 '+escapeHtml(row.minute_asof||'待核验')+'。':''}参考门槛不是委托；跌了不等于该接回，卖出也不保证能接回。${row.cycle_id?'本轮 '+escapeHtml(row.cycle_id):'尚无本轮实际T卖出记录时，不提供接回任务。'}</small></article>`;
  }).join(''):'<p class="tip">尚无可核验的做T观察。请等待分钟行情与本地持仓匹配；不会用演示价格补齐。</p>';
  const availability=Array.isArray(d.availability)?d.availability:Object.entries(d.availability||{}).map(([code,x])=>({...x,code}));
- $('t-availability-list').innerHTML=availability.length?'<h4>已确认的可卖数量（以记录日期为准）</h4>'+table(['代码','确认日期','确认可卖数量'],availability.map(x=>tr([escapeHtml(x.code),escapeHtml(x.date||'待核验'),format(x.available_quantity,0)]))):'<p class="tip">尚未确认今日可卖数量；只展示观察，不核定可执行股数。</p>';
+ $('t-availability-list').innerHTML=availability.length?'<h4>已记录的可卖数量（非券商实时同步）</h4>'+table(['代码','核对时间','来源','记录可卖数量'],availability.map(x=>tr([escapeHtml(x.code),escapeHtml(x.confirmed_at||x.date||'待核验'),x.source==='broker_screenshot'?'当日持仓截图':'手动核对',format(x.available_quantity,0)])))+'<p class="tip">当日截图仅在持仓、成本和现金匹配时复用；之后若有成交或挂单冻结，请重新核对可卖数量。</p>':'<p class="tip">尚未确认今日可卖数量；只展示观察，不核定可执行股数。</p>';
  $('t-cycle-list').innerHTML=cycles.length?'<h4>本地T轮次</h4>'+table(['标的 / 日期','实际T卖出','已接回 / 未接回','已配对毛差','已配对净盈亏','状态'],[...cycles].reverse().map(c=>{
   const closed=c.status==='closed',unmatched=tCycleRemaining(c),reduced=unmatched>0&&(c.status==='cash'||c.expired);
   const netLabel=c.paired_net_actual!=null?money(c.paired_net_actual)+'（实付费用 '+money(c.paired_fee_actual)+'）':c.paired_net_estimate!=null?money(c.paired_net_estimate)+'（费用待补，含预留估算）':'—';

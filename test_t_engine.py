@@ -115,4 +115,37 @@ class TEngineTests(unittest.TestCase):
         late=self.now.replace(hour=14,minute=50);q=deepcopy(self.quote);q[self.code]['source_timestamp']=late.isoformat()
         self.assertEqual(self.call(now=late,quotes=q,minutes=self.minutes(now=late))['signals'],[])
 
+    def test_waiting_has_reasons_and_no_premature_buyback_task(self):
+        prices=[20.2]*57+[20.1,20,19.9]
+        quotes=deepcopy(self.quote);quotes[self.code]['price']=19.9
+        result=self.call(quotes=quotes,minutes=self.minutes(prices))
+        row=result['rows'][0]
+        self.assertEqual(result['signals'],[])
+        self.assertIn('低于分时均价',row['status'])
+        self.assertTrue(any(x['label']=='冲高至均价上方' and x['passed'] is False for x in row['checks']))
+        self.assertIsNone(row['target_buy'])
+        self.assertGreater(row['target_sell'],row['vwap'])
+        self.assertEqual(row['t_capacity'],100)
+        self.assertIsNone(row['quantity'])
+
+    def test_etf_threshold_uses_tick_and_all_risk_blocks_visible_before_pattern(self):
+        cfg=deepcopy(self.cfg);cfg['positions'][0].update(type='etf',quantity=45000)
+        cfg['trade_plans'][self.code]['stop_loss']=.6
+        book={'availability':{self.code:{'date':str(self.now.date()),'base_quantity':45000,'available_quantity':7900}},'cycles':[]}
+        risk=deepcopy(self.risk);risk['strategy']['exposure_pct']=99
+        prices=[.69]*57+[.68,.675,.67]
+        q=deepcopy(self.quote);q[self.code]['price']=.67
+        row=self.call(cfg=cfg,ledger=book,risk=risk,quotes=q,minutes=self.minutes(prices))['rows'][0]
+        self.assertEqual(row['t_capacity'],7900)
+        self.assertAlmostEqual(row['target_sell']*1000,round(row['target_sell']*1000))
+        self.assertTrue(any('总仓位超限' in s for s in row['blockers']))
+        self.assertFalse(row['tradable'])
+
+    def test_stale_inputs_do_not_generate_candidate_threshold_or_cost(self):
+        q=deepcopy(self.quote);q[self.code]['source_timestamp']=(self.now-timedelta(minutes=5)).isoformat()
+        row=self.call(quotes=q)['rows'][0]
+        self.assertIsNone(row['target_sell'])
+        self.assertNotIn('break_even_buy_price',row)
+        self.assertTrue(any(c['label']=='完整行情与分时' and not c['passed'] for c in row['checks']))
+
 if __name__=='__main__':unittest.main()

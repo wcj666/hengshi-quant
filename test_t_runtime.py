@@ -121,4 +121,55 @@ class TRuntimeTests(unittest.TestCase):
         saved=json.loads((self.root/'config.json').read_text());self.assertEqual(saved,self.cfg)
         self.assertEqual(client.get('/api/t-observe',headers=h).json['cycles'][0]['unbought_quantity'],100)
 
+    def screenshot(self,quantity=200,asof=None):
+        row={**self.cfg['positions'][0],'available_quantity':quantity,'screenshot_price':20,'market_value':6000}
+        stamp=asof or self.now-timedelta(minutes=10)
+        snapshot={'asof':stamp.isoformat(),'available_cash':self.cfg['cash'],
+                  'total_market_value':6000,'total_assets':6000+self.cfg['cash'],'positions':[row]}
+        folder=self.out/'broker_snapshots';folder.mkdir(parents=True,exist_ok=True)
+        (folder/'broker_test.json').write_text(json.dumps(snapshot))
+
+    def test_today_matching_screenshot_reused_without_mutating_ledger_or_account(self):
+        self.screenshot();before=json.dumps(self.cfg)
+        book=tr.ledger(self.out,self.cfg,self.now)
+        item=book['availability']['600406']
+        self.assertEqual((item['available_quantity'],item['base_quantity'],item['source']),(200,300,'broker_screenshot'))
+        self.assertFalse((self.out/'t_ledger.json').exists())
+        self.assertEqual(before,json.dumps(self.cfg))
+        self.assertEqual(book['revision'],tr.ledger(self.out,self.cfg,self.now)['revision'])
+        self.screenshot(quantity=0)
+        self.assertEqual(tr.ledger(self.out,self.cfg,self.now)['availability']['600406']['available_quantity'],0)
+        self.assertNotEqual(book['revision'],tr.ledger(self.out,self.cfg,self.now)['revision'])
+
+    def test_old_future_mismatch_and_bad_sellable_screenshot_not_used(self):
+        for quantity,when in [(301,self.now-timedelta(minutes=10)),(True,self.now-timedelta(minutes=10)),
+                               (200,self.now-timedelta(days=1)),(200,self.now+timedelta(days=1))]:
+            self.screenshot(quantity,when)
+            self.assertEqual(tr.ledger(self.out,self.cfg,self.now)['availability'],{})
+        self.screenshot();self.cfg['cash']+=1
+        self.assertEqual(tr.ledger(self.out,self.cfg,self.now)['availability'],{})
+
+    def test_newer_manual_and_actual_fill_override_screenshot(self):
+        self.screenshot();self.avail(100)
+        self.assertEqual(tr.ledger(self.out,self.cfg,self.now)['availability']['600406']['available_quantity'],100)
+        self.screenshot(200,self.now-timedelta(seconds=1))
+        self.assertEqual(tr.ledger(self.out,self.cfg,self.now)['availability']['600406']['available_quantity'],100)
+        self.cfg['reconciled_trades']=[{'code':'600406','executed_at':self.now.isoformat()}]
+        (self.out/'t_ledger.json').unlink()
+        self.assertEqual(tr.ledger(self.out,self.cfg,self.now)['availability'],{})
+
+    def test_saved_snapshot_evidence_revalidates_after_config_change(self):
+        self.screenshot()
+        tr.save_fee_model(self.out,self.cfg,{'kind':'etf','commission_per_10k':5,'minimum_commission':None})
+        self.assertIn('600406',tr.ledger(self.out,self.cfg,self.now)['availability'])
+        self.cfg['cash']+=1
+        self.assertEqual(tr.ledger(self.out,self.cfg,self.now)['availability'],{})
+
+    def test_api_renders_current_positions_when_worker_has_old_portfolio(self):
+        (self.root/'config.json').write_text(json.dumps(self.cfg))
+        storage.write(self.out/'intraday_status.json',{'t_observe':{'rows':[{'code':'000001','name':'已清仓','target_sell':20}]}})
+        d=create_app(self.root).test_client().get('/api/t-observe').json
+        self.assertTrue(d['stale']);self.assertEqual([r['code'] for r in d['rows']],['600406'])
+        self.assertEqual(d['signals'],[])
+
 if __name__=='__main__':unittest.main()

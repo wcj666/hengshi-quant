@@ -190,7 +190,7 @@
       <div id="signal-switch-list" class="signal-list"></div>
     </section>
     <section id="signals-t" class="trade-section">
-      <div class="section-heading"><div><span class="eyebrow">SIGNALS / T · HOLDINGS ONLY</span><h2>做T条件观察</h2><p>先卖后买、保留底仓；只作条件提醒，不下单，也不保证能接回或赚取价差。</p></div><span id="t-count" class="pill muted">等待分钟行情</span></div>
+      <div class="section-heading"><div><span class="eyebrow">SIGNALS / T · HOLDINGS ONLY</span><h2>做T条件观察</h2><p>只观察当前持仓：冲高回落后先卖，登记真实成交，再等价差和企稳接回。普通减仓不自动接回。</p></div><span id="t-count" class="pill muted">等待分钟行情</span></div>
       <div class="panel t-intro"><div class="panel-head"><div><h3>先核条件，再决定是否做T</h3><p id="t-status">正在核验分时行情、可卖数量和本轮T记录。</p></div><button type="button" id="t-refresh" class="btn ghost">↻ 更新做T观察</button></div>
         <div class="t-mode-grid"><div><strong>先卖后买 · 当前观察方式</strong><p>高抛只使用今日券商确认可卖的旧底仓；接回仅限本轮已登记的实际T卖出余量。普通减仓、止损卖出不会自动变成接回任务。</p></div><div><strong>先买后卖 · 暂不提供可执行提示</strong><p>需要额外现金、可卖旧底仓和完整风险额度；当前V1不在现有仓位追加买入，不能绕过新增风控。</p></div></div>
         <p class="tip">股票及股票ETF按T+1核验；黄金股ETF也属于股票ETF，不能因名称含“黄金”就当作T+0。新买份额不能充当今天可卖底仓。只有100股时默认不做T；价差不足覆盖费用与滑点时不提示。</p>
@@ -201,7 +201,7 @@
           <p class="tip">只填写已核实的费用参数。相近金额的同品种实际费用会用于估算，费用仍未知时使用预留估算；盘中提示继续保留价差门槛。</p>
         </details>
       </div>
-      <div class="panel"><div class="panel-head"><div><h3>逐只观察</h3><p>缺可卖数量时仅展示观察条件，不显示可执行股数；源数据过期时清空价格条件。</p></div></div><div id="t-observation-list" class="t-observation-grid">正在加载。</div></div>
+      <div class="panel"><div class="panel-head"><div><h3>逐只观察 · 为什么还没提醒</h3><p>逐项核对冲高回落、费用、当日可卖数量与接回风控。没有信号也显示等待原因；触到价格门槛不等于可以下单。</p></div></div><div id="t-observation-list" class="t-observation-grid">正在加载。</div></div>
       <div class="panel-head"><h3>本轮做T提醒</h3><span id="signal-t-badge" class="pill muted">未监测</span></div>
       <div id="signal-t-list" class="signal-list"></div>
       <div class="panel"><h3>本地做T记录</h3><p class="tip">有成交对账记录时可填该笔成交编号，复用数量、价格和费用。也可以直接填写真实成交，另在成交对账中同步持仓和现金。</p>

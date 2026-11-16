@@ -593,13 +593,16 @@ def create_app(folder:Path=ROOT):
                    and not state.get('quote_health',{}).get('block_trade_signals'))
         if not payload:
             payload={'rows':[],'signals':[],'status':'等待后台采集当前分钟数据后核验做T条件'}
+        current={str(p['code']):p for p in cfg.get('positions',[]) if int(p.get('quantity',0))>0 and p.get('type') in ('stock','etf')}
+        old_rows={str(row.get('code')):row for row in payload.get('rows',[])}
+        payload['rows']=[{**old_rows.get(code,{}),'code':code,'name':p.get('name',code)} for code,p in current.items()]
         settings=t_runtime.settings(cfg,book)
         payload.update(enabled=settings['enabled'],settings=settings,
                        cycles=book['cycles'][-30:],availability=book['availability'],stale=not valid)
         if not valid:
             payload['signals']=[]
             payload['status']='非有效盘中、行情过期或台账已变化；暂停做T提示，保留记录供核对'
-            payload['rows']=[{**row,'quantity':None,'tradable':False,'status':'暂停提示',
+            payload['rows']=[{**row,'quantity':None,'tradable':False,'last_status':row.get('status'),'status':'暂停提示',
                               'blockers':list(dict.fromkeys(row.get('blockers',[])+['当前盘中快照未核验']))} for row in payload.get('rows',[])]
         return jsonify(payload)
 

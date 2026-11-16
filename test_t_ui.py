@@ -107,4 +107,14 @@ if(popupActive?.category==='t'||!$('trade-signal-popup').className.includes('hid
 if($('nav-count-t').textContent!==0)throw Error('stale T badge remained current');
 ''')
 
+    def test_waiting_checks_and_snapshot_provenance_are_visible_without_trade_signal(self):
+        self.run_js(r'''
+renderTObserve({enabled:true,stale:false,rows:[{code:'588170',name:'科创半导',status:'暂不做T',phase:'wait',price:.66,target_sell:.69,target_buy:.65,quantity:null,t_capacity:7900,available_quantity:7900,checks:[{label:'冲高至均价上方',passed:false,detail:'当前仍在均价下方'},{label:'价差覆盖成本',passed:null,detail:'待核验'}]}],availability:{'588170':{date:'2026-11-16',source:'broker_screenshot',available_quantity:7900}},cycles:[]});
+const html=$('t-observation-list').innerHTML;
+if(!html.includes('当前仍在均价下方')||!html.includes('未通过')||!html.includes('高抛观察门槛'))throw Error('waiting diagnostics missing');
+if(html.includes('0.650'))throw Error('buyback target leaked without actual sale');
+if(!$('t-count').textContent.includes('0只条件通过'))throw Error('waiting row treated as ready');
+if(!$('t-availability-list').innerHTML.includes('当日持仓截图'))throw Error('snapshot evidence provenance missing');
+''')
+
 if __name__=='__main__':unittest.main()

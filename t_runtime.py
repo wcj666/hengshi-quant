@@ -1,6 +1,8 @@
 """Local T-observation journals. Actual fills are user supplied, never executed here."""
 from datetime import datetime
 from pathlib import Path
+import hashlib
+import json
 import secrets
 import threading
 import strategy_runtime as storage
@@ -28,6 +30,30 @@ def ledger(output,cfg,now=None):
     if not isinstance(data,dict) or not isinstance(data.get('availability'),dict) or not isinstance(data.get('cycles'),list):
         raise ValueError('做T日志损坏，暂停做T复核，请恢复备份')
     positions={str(p['code']):p for p in cfg.get('positions',[]) if int(p.get('quantity',0))>0}
+    # Reuse user-supplied, internally reconciled screenshots only on their own
+    # trading date. This is inventory evidence, never a broker live connection.
+    from broker_snapshot import latest_broker_snapshot
+    snapshot=latest_broker_snapshot(output,cfg)
+    stamp=parse_provider_time((snapshot or {}).get('asof'))
+    data['availability']={code:row for code,row in data['availability'].items()
+                          if code in positions and row.get('source')!='broker_screenshot'}
+    if stamp and stamp.astimezone(CST).date()==now.astimezone(CST).date() and stamp<=now:
+        for item in snapshot['positions']:
+            code=item['code'];value=item.get('available_quantity')
+            if isinstance(value,bool) or not isinstance(value,int) or not 0<=value<=item['quantity']:continue
+            if any(c.get('code')==code and c.get('date')==str(now.date()) for c in data['cycles']):continue
+            if any(str(f.get('code'))==code and (parse_provider_time(f.get('executed_at')) or stamp)>stamp
+                   for f in cfg.get('reconciled_trades',[])):continue
+            old=data['availability'].get(code,{})
+            prior=parse_provider_time(old.get('confirmed_at'))
+            if prior and prior>=stamp:continue
+            data['availability'][code]={'date':str(stamp.astimezone(CST).date()),
+                'available_quantity':value,'base_quantity':item['quantity'],'confirmed_at':stamp.isoformat(),
+                'name':item['name'],'source':'broker_screenshot'}
+    # Evidence changes must invalidate previously computed T observations even
+    # when quantities/cost/cash happen to be unchanged.
+    data['revision']=hashlib.sha256(json.dumps([data.get('revision'),data['availability']],
+        sort_keys=True,ensure_ascii=False).encode()).hexdigest()
     for cycle in data['cycles']:
         code=cycle['code'];p=positions.get(code,{})
         expected=int(cycle['base_quantity'])-int(cycle['quantity'])+int(cycle.get('buyback_quantity',0))

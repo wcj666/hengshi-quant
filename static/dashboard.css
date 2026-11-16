@@ -337,6 +337,11 @@ footer{padding-top:18px}
 .t-price-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;padding:12px 0;margin:9px 0;border-top:1px solid #eeeaf3;border-bottom:1px solid #eeeaf3}
 .t-price-grid>div{min-width:0}.t-price-grid span{display:block;font-size:10px;color:#8591a0;margin-bottom:5px}.t-price-grid b{font-size:15px;color:#31465b;font-variant-numeric:tabular-nums}
 .t-blockers{padding-left:20px;color:#936a34;font-size:12px;line-height:1.7;margin:12px 0 0}
+.t-checklist{list-style:none;padding:0;margin:14px 0;display:grid;gap:8px}
+.t-checklist li{border-left:3px solid #d2a760;background:#fff8eb;padding:8px 10px;font-size:12px;line-height:1.6}
+.t-checklist li.pass{border-color:#729887;background:#f1f7f4}
+.t-checklist strong,.t-checklist span{display:block}
+.t-checklist span{color:#566777}
 .t-entry-form{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:13px;padding:16px 0}
 .t-entry-form>label{min-width:0;display:flex;flex-direction:column;gap:7px;font-size:12px;color:#6c7c8e}
 .t-entry-form input,.t-entry-form select{width:100%;min-width:0}

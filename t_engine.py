@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 import hashlib
 import math
 from quote_health import parse_provider_time
-from t_costs import money, roundtrip, sold_fee_for_quantity
+from t_costs import money, roundtrip, sold_fee_for_quantity, decimal, TICKS, ROUND_CEILING, ROUND_FLOOR
 
 CN=ZoneInfo('Asia/Shanghai')
 RISK_EXITS={'stop','take_profit_1','take_profit_2','structure_support','structure_weakness','time_5','time_10'}
@@ -98,6 +98,87 @@ def _signal(row,clock,cycle_id=''):
             'shares':row.get('quantity'),'held':True,'day':str(clock.date()),'priority':'normal',
             'tradable':row.get('tradable',False),'blockers':row.get('blockers',[]),
             'data_note':'做T条件观察，不自动下单；须核对券商可卖数及实际成交。价差与费用为估算，不能保证收益。'}
+
+
+def _restore_blockers(cfg, risk, base, price, code):
+    blockers=[];strategy=risk.get('strategy') or {};equity=_positive(risk.get('equity'))
+    account=strategy.get('account') or {};limits=cfg.get('strategy_v1') or {}
+    if account.get('verified') is not True or account.get('needs_reconcile') is not False or account.get('paused'):
+        blockers.append('账户未核对或暂停，当前不允许承诺接回')
+    drawdown=_number(account.get('drawdown'),0)
+    if drawdown is None or drawdown>=min(500.,_positive(limits.get('pause_drawdown')) or 500.):
+        blockers.append('账户回撤未核验或已达暂停线')
+    exposure=_number(strategy.get('exposure_pct'),0)
+    if exposure is None or exposure>min(60.,_positive(limits.get('max_exposure_pct')) or 60.):
+        blockers.append('当前总仓位超限，接回将恢复高仓位')
+    if equity is None or base*price>equity*min(15.,_positive(limits.get('max_position_pct')) or 15.)/100:
+        blockers.append('原底仓单一证券仓位超限，接回受限')
+    if not _positive((cfg.get('trade_plans') or {}).get(code,{}).get('stop_loss')) or risk.get('existing_planned_stress') is None:
+        blockers.append('固定止损或组合风险未知，接回条件未通过')
+    return blockers
+
+
+def _tick(value,kind,rounding):
+    tick=TICKS[kind]
+    return float((decimal(value)/tick).to_integral_value(rounding=rounding)*tick)
+
+
+def _explain(row,position,cfg,risk,quote,minutes,ledger,clock,session):
+    """Explain waiting and blocking states without manufacturing a new signal."""
+    checks=[];row['checks']=checks
+    def check(label,passed,detail):checks.append({'label':label,'passed':passed,'detail':detail})
+    code=row['code'];kind=position['type'];held=int(position['quantity']);prefs=_settings(cfg)
+    entry=(ledger.get('availability') or {}).get(code,{})
+    available=_integer(entry.get('available_quantity'))
+    confirmed=(entry.get('date')==str(clock.date()) and _integer(entry.get('base_quantity'))==held
+               and available is not None and available<=held)
+    cap=int(held*prefs['max_fraction']//100)*100
+    capacity=min(cap,available//100*100) if confirmed else None
+    row.update(held_quantity=held,available_quantity=available if confirmed else None,
+               availability_asof=entry.get('confirmed_at') if confirmed else None,
+               availability_source=entry.get('source','manual') if confirmed else None,
+               t_capacity=capacity,quote_asof=quote.get('source_timestamp'))
+    check('交易时段',session and (bool(row.get('cycle_id')) or clock.time()<time(14,45)),
+          '14:45后不开新T；休市保留记录，下一交易日重新核验')
+    check('当日可卖底仓',confirmed and capacity>=100 if confirmed else False,
+          f'已记录可卖{available}份；保留至少2/3底仓，本轮测算上限{capacity}份' if confirmed else '需要今天的券商可卖数量；不由T+1自动推算')
+    fresh=bool(row['price'] and _fresh(quote.get('source_timestamp'),clock,90) and risk.get('valid') is True)
+    data,error=_minutes(minutes,clock)
+    check('完整行情与分时',fresh and data is not None,error or ('行情源时间已核验' if fresh else '报价或全账户行情待核验'))
+    if not fresh or not data or not session:return
+    if row.get('cycle_id'):
+        check('回补风控',not row['blockers'],'；'.join(row['blockers']) or '仅对实际T卖出后的剩余数量复核，不能超额接回')
+        check('回补触发',row['phase']=='buyback_ready',row['reason'])
+        return
+    price=row['price'];vwap=data['vwap'];prices=data['prices']
+    deviation=prefs['etf_deviation_pct'] if kind=='etf' else prefs['stock_deviation_pct']
+    peak=max(prices[-12:]);fall=data['consecutive'] and prices[-3]>prices[-2]>prices[-1] and price<=prices[-1] and price<sum(prices[-5:])/5
+    row['deviation_pct']=round((price/vwap-1)*100,3)
+    check('冲高至均价上方',peak>=vwap*(1+deviation/100) and price>vwap,
+          f'最近12分钟需冲高至均价上方{deviation:g}%，当前偏离均价{row["deviation_pct"]:+.3f}%')
+    check('冲高后回落',fall,'需连续3个已完成分钟逐步回落，最新价不高于末分钟且低于5分钟平均价')
+    if capacity and capacity>=100:
+        costs=roundtrip(kind,price,capacity,prefs['fee_reserve'],ledger.get('fee_model') or {},ledger.get('fee_samples') or [])
+        row.update(costs)
+        reserve=max(prefs['fee_reserve'],costs['estimated_roundtrip_fee'])
+        gross=(price-vwap)*capacity
+        check('价差覆盖成本',gross>=2*reserve,
+              f'假设回落至分时均价，毛价差{money(gross):.2f}元；触发至少需{2*reserve:.2f}元（含费用滑点缓冲）')
+        row['minimum_spread']=_tick(2*reserve/capacity,kind,ROUND_CEILING)
+        # Waiting cards show a minimum observation threshold, not the current
+        # price falsely labelled as an actionable sell price.
+        if row['phase'] in ('wait','sell_watch'):
+            row['target_sell']=_tick(max(vwap*(1+deviation/100),vwap+2*reserve/capacity),kind,ROUND_CEILING)
+    else:check('价差覆盖成本',None,'可卖数量未核验或不足一手，暂不计算净收益和费用门槛')
+    restore=_restore_blockers(cfg,risk,held,price,code)
+    if row['phase']=='risk_first':restore=[row['reason']]+restore
+    check('卖出后是否允许接回',not restore,'；'.join(restore) or '当前通过，实际卖出后仍须重新核对现金、仓位及风险')
+    row['blockers']=list(dict.fromkeys(row['blockers']+restore+([] if confirmed else ['请先确认今天券商可卖数量'])))
+    # No actual T sale means there is no executable buyback task.
+    row['target_buy']=None
+    if row['phase']=='wait':
+        row['status']='暂不做T：当前低于分时均价' if price<=vwap else '等待冲高回落确认'
+        row['reason']='；'.join(x['detail'] for x in checks if x['passed'] is not True)
 
 
 def _buyback_blockers(cfg,position,quote,risk,cycle,ledger,quantity,price,fee):
@@ -197,7 +278,7 @@ def build_t_observations(cfg,quotes,risk,minute_by_code,ledger,now=None,market_s
                             sell_fee=sold_fee_for_quantity(cycle,quantity))
             row.update(costs)
             fee=max(fee,costs['estimated_roundtrip_fee'])
-            target=sell_price-2*fee/quantity
+            target=_tick(sell_price-2*fee/quantity,kind,ROUND_FLOOR)
             row.update(fee_reserve=fee)
             row.update(target_buy=round(target,4),target_sell=sell_price)
             gross=(sell_price-price)*quantity
@@ -236,16 +317,7 @@ def build_t_observations(cfg,quotes,risk,minute_by_code,ledger,now=None,market_s
         gross=(price-target_buy)*screening_quantity
         if gross<2*row['fee_reserve']:
             row.update(status='价差不足，跳过做T',reason='假设回落至分时均价的毛价差不足费用预留的2倍，不为小波动频繁交易');continue
-        restore=[];strategy=risk.get('strategy') or {};equity=_positive(risk.get('equity'))
-        account=strategy.get('account') or {};limits=cfg.get('strategy_v1') or {}
-        if account.get('verified') is not True or account.get('needs_reconcile') is not False or account.get('paused'):
-            restore.append('账户未核对或暂停，当前不允许承诺接回')
-        drawdown=_number(account.get('drawdown'),0)
-        if drawdown is None or drawdown>=min(500.,_positive(limits.get('pause_drawdown')) or 500.):restore.append('账户回撤未核验或已达暂停线')
-        exposure=_number(strategy.get('exposure_pct'),0)
-        if exposure is None or exposure>min(60.,_positive(limits.get('max_exposure_pct')) or 60.):restore.append('当前总仓位超限，接回将恢复高仓位')
-        if equity is None or base*price>equity*min(15.,_positive(limits.get('max_position_pct')) or 15.)/100:restore.append('原底仓单一证券仓位超限，接回受限')
-        if not _positive((cfg.get('trade_plans') or {}).get(code,{}).get('stop_loss')) or risk.get('existing_planned_stress') is None:restore.append('固定止损或组合风险未知，接回条件未通过')
+        restore=_restore_blockers(cfg,risk,base,price,code)
         if restore:
             row.update(phase='sell_watch',status='高抛/减仓观察（接回受限）',reason='冲高回落条件出现，但当前风控不允许确认接回；只作高抛/减仓观察，不承诺完成做T。',blockers=restore+(['请先确认今天券商可卖数量'] if quantity is None else []),quantity=None,tradable=False)
         elif quantity is None:
@@ -253,4 +325,8 @@ def build_t_observations(cfg,quotes,risk,minute_by_code,ledger,now=None,market_s
         else:
             row.update(phase='sell_ready',status='做T高抛条件观察',reason='分时偏离均价后连续3个完成分钟回落，假设价差覆盖费用门槛；仅可复核已确认的旧底仓。卖出后可能无法低价接回。',quantity=quantity,tradable=True,gross_spread_estimate=money(gross),net_spread_estimate=money(gross-row['estimated_roundtrip_fee']))
         result['signals'].append(_signal(row,clock))
+    positions={str(p['code']).zfill(6):p for p in cfg.get('positions',[])}
+    for row in result['rows']:
+        _explain(row,positions[row['code']],cfg,risk,quotes.get(row['code']) or {},
+                 (minute_by_code or {}).get(row['code']),ledger,clock,session)
     return result
