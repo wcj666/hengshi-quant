@@ -127,10 +127,13 @@ def valuation(state,quotes,now,*,closing=False):
 
 
 def observe(state,quotes,now,*,closing=False):
+    from pnl_engine import valid_price
+
     equity,asof=valuation(state,quotes,now,closing=closing)
     state['last_equity']=equity;state['last_valuation_asof']=asof
     state['last_position_marks']={c:{'quantity':p['quantity'],'price':quotes[c]['price'],
-        'value':money(p['quantity']*quotes[c]['price']),'source_timestamp':quotes[c]['source_timestamp']}
+        'value':money(p['quantity']*quotes[c]['price']),'source_timestamp':quotes[c]['source_timestamp'],
+        'previous_close':valid_price(quotes[c].get('previous_close'))}
         for c,p in state['positions'].items()}
     state['last_mark_closing']=bool(closing)
     state['high_water']=max(state['high_water'],equity)

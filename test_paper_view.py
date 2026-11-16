@@ -3,8 +3,8 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from datetime import datetime
-from paper_contest import initialize,observe,CN
+from datetime import datetime, timedelta
+from paper_contest import initialize,observe,execute,money,CN
 from paper_view import load_snapshot
 from web_dashboard import create_app
 
@@ -48,12 +48,57 @@ class PaperViewTests(unittest.TestCase):
 
     def test_fresh_per_position_marks_come_from_paper_observation(self):
         now=datetime(2026,11,13,10,tzinfo=CN)
-        observe(self.state,{'600406':{'price':9.8,'source_timestamp':now.isoformat()}},now)
+        observe(self.state,{'600406':{'price':9.8,'previous_close':10.0,'source_timestamp':now.isoformat()}},now)
         self.file.write_text(json.dumps(self.state))
         d=load_snapshot(self.store,now)
         self.assertEqual(d['equity'],99960.);self.assertEqual(d['positions'][0]['price'],9.8)
         self.assertEqual(d['positions'][0]['contest_pnl'],-40.);self.assertFalse(d['stale'])
         self.assertEqual(d['positions'][0]['cost'],15.)
+        self.assertEqual(d['daily']['pnl'],-40.)
+        self.assertEqual(d['daily']['basis_label'],'开赛快照')
+        self.assertEqual(d['positions'][0]['daily_pnl'],-40.)
+
+    def test_daily_pnl_uses_prior_complete_close_and_actual_sale_cost(self):
+        close=datetime(2026,11,13,15,5,tzinfo=CN)
+        observe(self.state,{'600406':{'price':9.9,'source_timestamp':close.isoformat()}},close,closing=True)
+        now=datetime(2026,11,19,10,tzinfo=CN)
+        quotes={'600406':{'price':9.8,'previous_close':9.9,'source_timestamp':now.isoformat(),
+                            'upper_limit':10.89,'lower_limit':8.91,'limit_status_verified':True,
+                            'bid1':9.79,'bid1_shares':1100,'ask1':9.8}}
+        trade=execute(self.state,'600406','sell',100,quotes,now,'合成减仓')
+        observe(self.state,quotes,now)
+        self.file.write_text(json.dumps(self.state))
+        d=load_snapshot(self.store,now)
+        expected=money(100*9.8-200*9.9+100*trade['price']-trade['fee']['total'])
+        self.assertEqual(d['daily']['date'],'2026-11-19')
+        self.assertEqual(d['daily']['basis_asof'],close.isoformat())
+        self.assertEqual(d['daily']['pnl'],expected)
+        self.assertEqual(d['positions'][0]['daily_pnl'],expected)
+
+    def test_stale_intraday_or_missing_previous_close_does_not_show_zero(self):
+        now=datetime(2026,11,19,10,tzinfo=CN)
+        observe(self.state,{'600406':{'price':9.8,'source_timestamp':now.isoformat()}},now)
+        self.file.write_text(json.dumps(self.state))
+        d=load_snapshot(self.store,now)
+        self.assertIsNone(d['daily']['pnl'])
+        self.assertIn('缺少',d['daily']['message'])
+        self.assertIsNone(d['positions'][0]['daily_pnl'])
+        stale=load_snapshot(self.store,now+timedelta(minutes=3))
+        self.assertTrue(stale['stale'])
+        self.assertEqual(stale['daily']['message'],'等待有效行情')
+        self.assertIsNone(stale['positions'][0]['daily_pnl'])
+
+    def test_daily_pnl_waits_for_a_mark_after_latest_trade(self):
+        now=datetime(2026,11,13,10,tzinfo=CN)
+        quotes={'600406':{'price':9.8,'previous_close':10.0,'source_timestamp':now.isoformat(),
+                          'upper_limit':11,'lower_limit':9,'limit_status_verified':True,
+                          'bid1':9.79,'bid1_shares':1100,'ask1':9.8}}
+        observe(self.state,quotes,now)
+        execute(self.state,'600406','sell',100,quotes,now+timedelta(seconds=1),'合成减仓')
+        self.file.write_text(json.dumps(self.state))
+        d=load_snapshot(self.store,now+timedelta(seconds=2))
+        self.assertTrue(d['stale'])
+        self.assertIsNone(d['daily']['pnl'])
 
     def test_foreign_host_is_rejected(self):
         self.assertEqual(self.client.get('/api/paper-contest',headers={'Host':'foreign.example'}).status_code,403)

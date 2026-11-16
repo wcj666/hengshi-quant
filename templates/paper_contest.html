@@ -8,12 +8,13 @@
 <p id="refresh-status" class="refresh-status" role="status">正在读取后台取价状态…</p>
 <section class="metrics" aria-label="模拟账户概览">
 <article><span>最近估算总资产</span><strong id="equity">—</strong><small id="source">—</small></article>
+<article><span id="daily-label">当日盈亏</span><strong id="daily-pnl">—</strong><small id="daily-basis">等待读取收盘基准</small></article>
 <article><span>比赛净盈亏</span><strong id="pnl">—</strong><small id="return">从开赛净值计起</small></article>
 <article><span>可用模拟现金</span><strong id="cash">—</strong><small id="exposure">—</small></article>
 <article><span>虚拟成交记录</span><strong id="trade-count">—</strong><small id="drawdown">—</small></article>
 </section>
-<section class="panel"><div class="panel-head"><div><h2>当前模拟持仓</h2><p>账面成本保留原记录；持仓比赛盈亏按开赛价格或虚拟买入价计算。</p></div><span id="holding-count" class="tag">—</span></div>
-<div class="scroll"><table><thead><tr><th>证券</th><th>数量 / 可卖</th><th>账面成本</th><th>估值价 / 市值</th><th>持仓比赛盈亏</th><th>固定止损</th></tr></thead><tbody id="holdings"><tr><td colspan="6">账本加载中…</td></tr></tbody></table></div>
+<section class="panel"><div class="panel-head"><div><h2>当前模拟持仓</h2><p>逐只当日盈亏按行情昨收、当日虚拟成交和费用计算。账户当日盈亏也包含已清仓证券。</p></div><span id="holding-count" class="tag">—</span></div>
+<div class="scroll"><table><thead><tr><th>证券</th><th>数量 / 可卖</th><th>账面成本</th><th>估值价 / 市值</th><th>当日盈亏</th><th>持仓比赛盈亏</th><th>固定止损</th></tr></thead><tbody id="holdings"><tr><td colspan="7">账本加载中…</td></tr></tbody></table></div>
 </section>
 <section class="panel"><div class="panel-head"><div><h2>虚拟成交</h2><p>只记录实际巡检时取得有效盘口的估计成交，非券商成交回报。</p></div></div><div class="scroll"><table><thead><tr><th>时间</th><th>证券</th><th>方向 / 数量</th><th>估计成交价</th><th>费用 / 额外滑点</th><th>依据</th></tr></thead><tbody id="trades"><tr><td colspan="6">—</td></tr></tbody></table></div></section>
 <section class="foot"><p id="costs">—</p><p id="opening">—</p><p>交易时段后台每30秒取价，页面每15秒更新显示；“刷新行情”主动请求一次取价，同样受30秒频率限制。仅在已核验的比赛工作日运行，午间、周末休市。自动取价不会自动生成交易；虚拟买卖按策略巡检、盘口和可卖数量核验。Mac需运行软件并保持联网。</p></section>
