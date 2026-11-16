@@ -22,12 +22,15 @@ def _num(v):
 
 def build_signals(cfg, quotes, risk, *, trading_day, market_session, calendar_ok, demo=False,
                   snapshot=None, now=None):
+    from action_center import allowed_signals
     if (cfg.get('strategy_v1') or {}).get('enabled') is True:
-        return _build_v1_signals(cfg, quotes, risk, trading_day=trading_day,
+        rows = _build_v1_signals(cfg, quotes, risk, trading_day=trading_day,
                                  market_session=market_session, calendar_ok=calendar_ok,
                                  demo=demo, snapshot=snapshot, now=now)
-    return _build_legacy_signals(cfg, quotes, risk, trading_day=trading_day,
+    else:
+        rows = _build_legacy_signals(cfg, quotes, risk, trading_day=trading_day,
                                 market_session=market_session, calendar_ok=calendar_ok, demo=demo)
+    return allowed_signals(cfg, rows)
 
 
 def _build_v1_signals(cfg, quotes, risk, *, trading_day, market_session, calendar_ok,

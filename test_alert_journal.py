@@ -5,7 +5,7 @@ from tempfile import TemporaryDirectory
 from unittest import TestCase, main
 from zoneinfo import ZoneInfo
 
-from alert_journal import capture_rows, load_journal, persist_cycle, validate_fill_link
+from alert_journal import capture_rows, load_journal, persist_cycle, validate_fill_link, set_feedback
 
 
 CN = ZoneInfo('Asia/Shanghai')
@@ -110,6 +110,109 @@ class AlertJournalTests(TestCase):
         sample['fills'].append(simulated.copy())
         report.write_text(json.dumps(sample))
         self.assertEqual(self.read()['replay']['status'], 'ambiguous')
+
+    def test_successful_strong_notifications_repeat_at_most_three_times(self):
+        sent = []
+        def send(row):
+            sent.append(row.copy())
+            return True
+        for offset in (0, 30, 59, 60, 90, 119, 120, 180, 240):
+            now = AT + timedelta(seconds=offset)
+            self.signal['price'] = 10.07 + offset / 1000
+            persist_cycle(self.output, self.rows(now), now=now, notify=True, send=send)
+        saved = self.read(now=AT + timedelta(seconds=240))
+        self.assertEqual(len(sent), 3)
+        self.assertEqual([round(row['price'], 3) for row in sent], [10.07, 10.13, 10.19])
+        self.assertEqual(saved['notification']['successful_count'], 3)
+        self.assertEqual(saved['notification']['attempts'], 3)
+        self.assertEqual(saved['price'], 10.07)  # Original evidence retained.
+        self.assertEqual(saved['at'], AT.isoformat())
+        self.assertEqual(saved['last_seen_at'], (AT + timedelta(seconds=240)).isoformat())
+
+    def test_seen_and_deferred_stop_reminders_without_recording_fills(self):
+        for action in ('seen', 'deferred'):
+            with self.subTest(action=action):
+                persist_cycle(self.output, self.rows(), now=AT, notify=True, send=lambda _: True)
+                feedback = set_feedback(self.output, ALERT_ID, action, day=str(AT.date()), now=AT + timedelta(seconds=5))
+                self.assertEqual(feedback['action'], action)
+                self.assertEqual(set_feedback(self.output, ALERT_ID, action, now=AT + timedelta(seconds=6)), feedback)
+                now = AT + timedelta(seconds=60)
+                result = persist_cycle(self.output, self.rows(now), now=now, notify=True,
+                                       send=lambda _: self.fail('acknowledged alert notified again'))
+                self.assertEqual(result['attempted'], 0)
+                row = self.read(now=now)
+                self.assertEqual(row['status'], action)
+                self.assertEqual(row['filled_quantity'], 0)
+                self.assertEqual(row['fills'], [])
+
+    def test_disappeared_or_stale_conditions_invalidate_previous_alert(self):
+        persist_cycle(self.output, self.rows(), now=AT, notify=True, send=lambda _: True)
+        later = AT + timedelta(seconds=60)
+        persist_cycle(self.output, [], now=later, notify=True,
+                      send=lambda _: self.fail('empty cycle cannot re-notify'))
+        saved = self.read(now=later)
+        self.assertFalse(saved['active'])
+        self.assertEqual(saved['status'], 'inactive')
+        self.assertEqual(saved['inactive_at'], later.isoformat())
+        # A paused/stopped worker also expires the live view without rewriting history.
+        persist_cycle(self.output, self.rows(later), now=later)
+        self.assertEqual(self.read(now=later + timedelta(seconds=91))['status'], 'inactive')
+
+    def test_actual_partial_fill_stops_reminders_and_feedback_cannot_mark_filled(self):
+        persist_cycle(self.output, self.rows(), now=AT, notify=True, send=lambda _: True)
+        fill = {'fill_id': 'actual-1', 'alert_id': ALERT_ID, 'code': CODE, 'side': 'buy',
+                'quantity': 100, 'price': 10.08, 'executed_at': (AT + timedelta(seconds=5)).isoformat()}
+        later = AT + timedelta(seconds=60)
+        persist_cycle(self.output, self.rows(later), now=later, trades=[fill], notify=True,
+                      send=lambda _: self.fail('do not repeat the original full quantity after partial fill'))
+        self.assertEqual(self.read(trades=[fill], now=later)['status'], 'partial')
+        with self.assertRaises(ValueError):
+            set_feedback(self.output, ALERT_ID, 'filled', now=later)
+        self.assertEqual(self.read(now=later)['filled_quantity'], 0)
+
+    def test_informational_basic_notifications_do_not_repeat(self):
+        self.signal.update(category='diagnostic', shares=None)
+        self.signal['priority'] = 'normal'
+        rows = self.rows()
+        rows[0].update(native=True, repeatable=False, side=None)
+        persist_cycle(self.output, rows, now=AT, notify=True, send=lambda _: True)
+        later = AT + timedelta(seconds=60)
+        again = [{**row, 'at': later.isoformat(), 'quote_at': later.isoformat()} for row in rows]
+        result = persist_cycle(self.output, again, now=later, notify=True,
+                               send=lambda _: self.fail('informational alert repeated'))
+        self.assertEqual(result['attempted'], 0)
+
+    def test_unknown_repeat_submission_cannot_retry_or_overwrite_prior_success(self):
+        persist_cycle(self.output, self.rows(), now=AT, notify=True, send=lambda _: True)
+        later = AT + timedelta(seconds=60)
+        persist_cycle(self.output, self.rows(later), now=later, notify=True, send=lambda _: None)
+        now = AT + timedelta(seconds=120)
+        result = persist_cycle(self.output, self.rows(now), now=now, notify=True,
+                               send=lambda _: self.fail('ambiguous submission duplicated'))
+        self.assertEqual(result['attempted'], 0)
+        notification = self.read(now=now)['notification']
+        self.assertTrue(notification['submitted'])
+        self.assertEqual(notification['successful_count'], 1)
+        self.assertEqual(notification['outcome'], 'unknown')
+
+    def test_feedback_validates_identity_date_and_known_row(self):
+        persist_cycle(self.output, self.rows(), now=AT)
+        for ident, day, action in [(ALERT_ID, '../escape', 'seen'), (ALERT_ID, '2024-02-30', 'seen'),
+                                   (ALERT_ID, '2024-06-18', 'seen'), ('b'*20, '2024-06-17', 'seen'),
+                                   ('bad', '2024-06-17', 'seen'), (ALERT_ID, '2024-06-17', 'executed')]:
+            with self.subTest(ident=ident,day=day,action=action), self.assertRaises(ValueError):
+                set_feedback(self.output, ident, action, day=day, now=AT)
+
+    def test_no_notification_after_session_or_initial_retry_window(self):
+        persist_cycle(self.output, self.rows(), now=AT)
+        later = AT + timedelta(seconds=121)
+        result = persist_cycle(self.output, self.rows(later), now=later, notify=True,
+                               send=lambda _: self.fail('old unnotified alert replayed'))
+        self.assertEqual(result['attempted'], 0)
+        close = AT.replace(hour=15, minute=0)
+        persist_cycle(self.output, self.rows(close), now=close, notify=True,
+                      send=lambda _: self.fail('notification after close'))
+        self.assertEqual(self.read(now=close)['status'], 'expired')
 
 
 if __name__ == '__main__':

@@ -19,6 +19,9 @@ ID = re.compile(r'[a-f0-9]{20}')
 MAX_NOTIFICATION_ATTEMPTS = 3
 RETRY_SECONDS = 30
 RETRY_WINDOW_SECONDS = 120
+MAX_SUCCESSFUL_NOTIFICATIONS = 3
+REMINDER_SECONDS = 60
+REMINDER_WINDOW_SECONDS = 600
 REPLAY_REASONS = {
     'v1_entry': 'breakout', 'stop': 'stop_loss',
     'take_profit_1': 'take_profit_1', 'take_profit_2': 'take_profit_2',
@@ -119,6 +122,7 @@ def capture_rows(events, signals, quotes, plans, *, now, source, config_hash):
             'blockers': event.get('blockers') or [], 'source': source, 'config_hash': config_hash,
             'signal_date': plans.get(code, {}).get('signal_date'),
             'native': bool(event.get('priority') == 'high' or side),
+            'repeatable': bool(event.get('priority') == 'high' or side),
         }
         result.append(row)
         seen_triggers.add((code, row['kind'] if code == 'PORT' else trigger))
@@ -135,6 +139,7 @@ def capture_rows(events, signals, quotes, plans, *, now, source, config_hash):
             'kind': kind, 'side': None, 'quantity': None, 'category': 'basic', 'at': stamp, 'day': day,
             'quote_at': quote_at, 'price': price, 'level': level, 'trigger': trigger,
             'reason': '已触发观察条件，请核对券商报价。', 'blockers': [], 'native': True,
+            'repeatable': False,
             'source': source, 'config_hash': config_hash, 'signal_date': None,
         })
     return result
@@ -146,32 +151,87 @@ def _can_notify(now):
     )
 
 
-def persist_cycle(output, rows, *, now, notify=False, send=None, clock=None):
-    """Save alerts before sending. Retry only when a fresh prompt still exists."""
-    day = now.astimezone(CN).date().isoformat()
+def _currently_active(row, now):
+    last = parse_provider_time(row.get('last_seen_at') or row.get('at'))
+    if (row.get('active') is False or not _can_notify(now) or not last
+            or last.astimezone(CN).date() != now.date()
+            or not 0 <= (now - last).total_seconds() <= 90):
+        return False
+    return row.get('code') == 'PORT' or bool(_quote_time(
+        {'source_timestamp': row.get('latest_quote_at') or row.get('quote_at')}, now))
+
+
+def set_feedback(output, ident, action, *, day=None, now=None):
+    """Acknowledge or decline a reminder. Neither action records a fill."""
+    now = _clock(now)
+    if not isinstance(ident, str) or not ID.fullmatch(ident):
+        raise ValueError('提醒编号无效')
+    if action not in ('seen', 'deferred'):
+        raise ValueError('请选择已看到或暂不执行；成交须另行登记真实成交记录')
+    day = day or now.date().isoformat()
+    if (not isinstance(day, str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}', day)
+            or day > now.date().isoformat()):
+        raise ValueError('提醒日期无效')
+    try:
+        datetime.strptime(day, '%Y-%m-%d')
+    except ValueError:
+        raise ValueError('提醒日期无效') from None
+    folder = journal_dir(output)
+    with _locked(folder):
+        journal = _day_rows(folder, day)
+        row = journal.get(ident)
+        if row is None:
+            raise ValueError('未找到该日提醒')
+        feedback = row.get('feedback') or {}
+        if feedback.get('action') == action:
+            return feedback
+        row['feedback'] = {'action': action, 'at': now.isoformat(timespec='seconds')}
+        row.setdefault('feedback_history', []).append(row['feedback'].copy())
+        write(folder / (day + '.json'), journal)
+        return row['feedback']
+
+
+def persist_cycle(output, rows, *, now, notify=False, send=None, clock=None, trades=()):
+    """Persist current eligibility; repeat fresh unacknowledged actions at most 3 times.
+
+    Each transmission is claimed under the file lock. Failed transmissions get
+    at most three attempts per reminder; ambiguous submissions are not retried.
+    First-alert retry windows and archived evidence stay tied to the original
+    observation, while repeats always use the current provider price/time.
+    """
+    now = _clock(now)
+    day = now.date().isoformat()
     result = {'attempted': 0, 'submitted': 0}
-    if not rows:
-        return result
     folder = journal_dir(output)
     path = folder / (day + '.json')
     candidates = []
+    current_by_id = {row['id']: row for row in rows}
     with _locked(folder):
         journal = _day_rows(folder, day)
         changed = False
+        for ident, saved in journal.items():
+            if ident not in current_by_id and saved.get('active') is not False:
+                saved.update(active=False, inactive_at=now.isoformat(timespec='seconds'))
+                changed = True
         for row in rows:
             ident = row['id']
             if ident not in journal:
                 journal[ident] = {**row, 'notification': {
-                    'attempts': 0, 'submitted': False, 'last_at': None, 'outcome': None,
+                    'attempts': 0, 'round_attempts': 0, 'submitted': False,
+                    'successful_count': 0, 'last_success_at': None, 'last_at': None, 'outcome': None,
                 }}
-                changed = True
+            saved = journal[ident]
+            saved.update(active=_can_notify(now), last_seen_at=now.isoformat(timespec='seconds'),
+                         latest_quote_at=row.get('quote_at'), latest_price=row.get('price'))
+            if saved['active']:
+                saved['inactive_at'] = None
+            changed = True
             if row['native'] and notify and send is not None:
                 candidates.append(ident)
         if changed:
             write(path, journal)
     # An in-flight entry is durably claimed before sending. Release the journal
     # lock around the system call so review/other processes can keep reading.
-    current_by_id = {row['id']: row for row in rows}
     for ident in dict.fromkeys(candidates):
         attempt_at = _clock(clock() if clock else now)
         if attempt_at.date().isoformat() != day or not _can_notify(attempt_at):
@@ -183,15 +243,27 @@ def persist_cycle(output, rows, *, now, notify=False, send=None, clock=None):
             journal = _day_rows(folder, day)
             saved = journal[ident]
             state = saved['notification']
+            # Migrate older journals without changing their original evidence.
+            successes = state.setdefault('successful_count', int(bool(state['submitted'])))
+            rounds = state.setdefault('round_attempts', 0 if successes else state['attempts'])
+            last_success = parse_provider_time(state.setdefault('last_success_at', state['last_at'] if successes else None))
             first = parse_provider_time(saved['at'])
             previous = parse_provider_time(state['last_at'])
-            if (state['submitted'] or state['attempts'] >= MAX_NOTIFICATION_ATTEMPTS
+            window = REMINDER_WINDOW_SECONDS if successes else RETRY_WINDOW_SECONDS
+            if ((saved.get('feedback') or {}).get('action') in ('seen', 'deferred')
+                    or not _currently_active(saved, attempt_at) or _linked_fills(saved, trades)
+                    or successes >= MAX_SUCCESSFUL_NOTIFICATIONS
+                    or (successes and (not current.get('repeatable', bool(current.get('side')))
+                                       or not last_success or (attempt_at - last_success).total_seconds() < REMINDER_SECONDS))
+                    or rounds >= MAX_NOTIFICATION_ATTEMPTS
+                    or state['attempts'] >= MAX_NOTIFICATION_ATTEMPTS * MAX_SUCCESSFUL_NOTIFICATIONS
                     or state.get('outcome') in ('sending', 'unknown')
-                    or not 0 <= (attempt_at - first).total_seconds() <= RETRY_WINDOW_SECONDS
+                    or not first or not 0 <= (attempt_at - first).total_seconds() <= window
                     or (previous and (attempt_at - previous).total_seconds() < RETRY_SECONDS)):
                 continue
             state['last_at'] = attempt_at.isoformat()
             state['attempts'] += 1
+            state['round_attempts'] += 1
             state['outcome'] = 'sending'
             attempt = state['attempts']
             write(path, journal)
@@ -202,9 +274,13 @@ def persist_cycle(output, rows, *, now, notify=False, send=None, clock=None):
         with _locked(folder):
             journal = _day_rows(folder, day)
             state = journal[ident]['notification']
-            if submitted or (state['attempts'] == attempt and not state['submitted']):
-                state['submitted'] = bool(submitted)
+            if state['attempts'] == attempt and state.get('outcome') == 'sending':
+                state['submitted'] = bool(submitted) or state['submitted']
                 state['outcome'] = 'submitted' if submitted else 'failed' if submitted is False else 'unknown'
+                if submitted:
+                    state['successful_count'] += 1
+                    state['last_success_at'] = attempt_at.isoformat()
+                    state['round_attempts'] = 0
                 write(path, journal)
         result['attempted'] += 1
         result['submitted'] += int(bool(submitted))
@@ -305,16 +381,23 @@ def load_journal(output, trades=(), *, now=None):
             fills = _linked_fills(row, trades)
             quantity = sum(fill['quantity'] for fill in fills)
             expired = day < clock.date().isoformat() or (day == clock.date().isoformat() and clock.time() >= time(15))
+            active = not expired and _currently_active(row, clock)
+            feedback = row.get('feedback') or {}
             if quantity and row['quantity'] is not None:
                 status = 'filled' if quantity >= row['quantity'] else 'partial'
             elif quantity:
                 status = 'linked'
             elif row.get('category') == 'diagnostic':
                 status = 'blocked'
+            elif expired:
+                status = 'expired'
+            elif feedback.get('action') in ('seen', 'deferred'):
+                status = feedback['action']
             else:
-                status = 'expired' if expired else 'pending'
+                status = 'pending' if active else 'inactive'
             result.append({
                 **row, 'filled_quantity': quantity, 'status': status, 'expired': expired,
+                'active': active, 'feedback': feedback,
                 'fills': [{k: fill.get(k) for k in ('fill_id', 'quantity', 'price', 'executed_at')} for fill in fills],
                 'replay': _minutes_comparison(report, row),
             })

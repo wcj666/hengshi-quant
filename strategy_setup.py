@@ -250,6 +250,8 @@ def evaluate_entry(cfg, code, quote, snapshot, *, setup=None, now=None):
     clock = _now(now)
     snapshot, quote = snapshot or {}, quote or {}
     blockers = []
+    if (cfg.get('execution_preferences') or {}).get('mode') == 'exit_only':
+        blockers.append('退出休息模式：暂停新增买入')
     plan = cfg.get('trade_plans', {}).get(code) or {}
     price = _number(quote.get('price'))
     source = parse_provider_time(quote.get('source_timestamp'))

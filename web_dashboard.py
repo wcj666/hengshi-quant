@@ -606,6 +606,56 @@ def create_app(folder:Path=ROOT):
                               'blockers':list(dict.fromkeys(row.get('blockers',[])+['当前盘中快照未核验']))} for row in payload.get('rows',[])]
         return jsonify(payload)
 
+    @app.route('/api/action-center')
+    def action_center_api():
+        from action_center import build_actions
+        from alert_journal import load_journal
+        with WRITE_LOCK:
+            cfg=config()
+            state=intraday_state().get_json()
+            book=t_runtime.ledger(output,cfg)
+            payload=build_actions(cfg,state,book)
+            journal=load_journal(output,cfg.get('reconciled_trades',[]))
+        ids={s['id'] for s in payload['signals']}
+        payload['alerts']=[r for r in journal['rows'] if r['id'] in ids and r.get('active',True)
+                           and r.get('status') not in ('filled','linked','expired','inactive')]
+        live_by_id={s['id']:s for s in payload['signals']}
+        cards_by_id={c['alert_id']:c for c in payload['cards'] if c['alert_id']}
+        for row in payload['alerts']:
+            current=live_by_id[row['id']];card=cards_by_id.get(row['id'])
+            row.update(price=current.get('price'),level=current.get('level'),reason=current.get('reason'),
+                       quantity=card.get('quantity') if card else None)
+        payload['preferences']={'mode':payload['mode'],
+            'native_sound':(cfg.get('execution_preferences') or {}).get('native_sound') is True}
+        payload['validation_note']='软件运行测试不等于策略盈利验证；实际成交、样本外回测与费用证据不足时，策略保持待验证。'
+        return jsonify(payload)
+
+    @app.route('/api/action-feedback/<ident>',methods=['POST'])
+    def action_feedback(ident):
+        from alert_journal import set_feedback
+        body=request.get_json(silent=True) or {}
+        result=set_feedback(output,ident,body.get('action'),day=body.get('day'))
+        return jsonify(ok=True,feedback=result,message='已记录处理状态，不代表已经成交。')
+
+    @app.route('/api/execution-preferences',methods=['PUT'])
+    def execution_preferences():
+        body=request.get_json(silent=True) or {}
+        if body.get('mode') not in ('normal','exit_only') or type(body.get('native_sound')) is not bool:
+            raise ValueError('请选择正常观察或退出休息，并明确是否启用桌面通知音效')
+        with WRITE_LOCK:
+            cfg=config();cfg['execution_preferences']={'mode':body['mode'],'native_sound':body['native_sound']}
+            save_config(cfg)
+        return jsonify(ok=True,message='已保存；等待下一轮有效行情重新核验。恢复正常观察不会解除原有风控限制。')
+
+    @app.route('/api/t-performance')
+    def t_performance_api():
+        from t_performance import build_review
+        with WRITE_LOCK:
+            cfg=config();book=t_runtime.ledger(output,cfg);state=intraday_state().get_json()
+        usable=not state.get('stale') and not state.get('config_mismatch') and state.get('mode')=='live'
+        quotes={r['code']:r for r in state.get('quotes',[])} if usable else {}
+        return jsonify(build_review(book,quotes))
+
     @app.route('/api/t-availability',methods=['PUT'])
     def t_available():
         with WRITE_LOCK:entry=t_runtime.confirm_available(output,config(),request.get_json(silent=True) or {})

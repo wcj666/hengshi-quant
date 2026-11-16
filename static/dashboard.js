@@ -911,7 +911,7 @@ function renderTradeSignals(d){
  else{addNote.textContent=`当前理论可分配新交易风险约${money(budget.available_new_risk)}；V1新增观察仍须核实最新报价、固定计划和人工复核。`;addNote.className='signal-note';}
  $('signal-reduce-note').textContent=activeAllowed?'减仓/止盈提示来自第三方快照，须检查券商实时价格、流动性和整账户风险。':'盘中轮询未就绪；历史信号不可用来替代新行情。';
  $('signal-switch-note').textContent='换仓先后两步：核实减仓→成交确认→更新现金与持仓→重新测算目标股可买数量。软件不会自动下单。';
- if(!activeAllowed)return;
+ if(!activeAllowed||window.hengshiActionCenter)return;
  const now=Date.now();
  const fresh=(d.new_trade_signals||[]).filter(x=>{
    const t=Date.parse(x.at||'');

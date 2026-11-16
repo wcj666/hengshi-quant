@@ -11,6 +11,7 @@ const time = value => {
 const labels = {
   pending: '待处理', expired: '已失效', filled: '已成交', partial: '部分成交',
   linked: '已有对账成交', blocked: '条件受阻',
+  seen: '已看到（未成交）', deferred: '暂不执行', inactive: '条件已失效',
 };
 const decisionLabels = {
   open_above_cap: '高开超过成交上限',

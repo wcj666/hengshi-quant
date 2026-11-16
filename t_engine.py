@@ -145,6 +145,9 @@ def _explain(row,position,cfg,risk,quote,minutes,ledger,clock,session):
     fresh=bool(row['price'] and _fresh(quote.get('source_timestamp'),clock,90) and risk.get('valid') is True)
     data,error=_minutes(minutes,clock)
     check('完整行情与分时',fresh and data is not None,error or ('行情源时间已核验' if fresh else '报价或全账户行情待核验'))
+    if row['phase']=='exit_only':
+        check('账户模式',False,row['reason'])
+        return
     if not fresh or not data or not session:return
     if row.get('cycle_id'):
         check('回补风控',not row['blockers'],'；'.join(row['blockers']) or '仅对实际T卖出后的剩余数量复核，不能超额接回')
@@ -246,6 +249,9 @@ def build_t_observations(cfg,quotes,risk,minute_by_code,ledger,now=None,market_s
              'buy_first_blockers':['当前V1不向已有持仓追加；先买后卖需要另行核验新增风险及原有可卖底仓，当前未启用'],
              'note':'仅研究提醒，不是委托；触价不是成交，不能承诺接回。'}
         result['rows'].append(row)
+        if (cfg.get('execution_preferences') or {}).get('mode')=='exit_only':
+            row.update(phase='exit_only',status='退出休息：暂停做T',reason='仅保留已有仓位的退出复核，不新开T，也不提示接回。')
+            continue
         if not session:row.update(phase='inactive',status='非有效盘中',reason='仅在已核验交易日的连续交易时段做T观察');continue
         if not price or not _fresh(quote.get('source_timestamp'),clock,90):row.update(phase='blocked',status='报价待核验',reason='当前价格或源时间未通过90秒新鲜度校验');continue
         if risk.get('valid') is not True:row.update(phase='blocked',status='账户行情待核验',reason='完整持仓行情不可用，暂停做T观察');continue

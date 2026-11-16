@@ -241,6 +241,7 @@ def native_notice(e):
     if platform.system()!='Darwin':return False
     msg=f"{e['name']} {e['kind']}：价格/回撤 {e['price']}；参考位 {e['level']}，请核对券商行情"
     applescript='display notification '+json.dumps(msg,ensure_ascii=False)+' with title "A股盘中监控：非委托"'
+    if e.get('sound') is True:applescript+=' sound name "Glass"'
     try:
         subprocess.run(['osascript','-e',applescript],check=True,timeout=8,capture_output=True)
         return True
@@ -449,7 +450,8 @@ def single_cycle(*,mode,notify=False,force_demo=False,probe=False,interval=10):
                 capture_rows(recording_events, recording_signals, quotes, cfg.get('trade_plans', {}),
                              now=journal_clock, source=state['data_source'], config_hash=cfg_hash),
                 now=journal_clock, notify=notify and not health['block_trade_signals'],
-                send=native_notice, clock=now_cn,
+                send=lambda row:native_notice({**row,'sound':row.get('repeatable') is True and (cfg.get('execution_preferences') or {}).get('native_sound') is True}),
+                clock=now_cn, trades=cfg.get('reconciled_trades',[]),
             )
             if archived['attempted']:
                 state['notifications_attempted']=archived['attempted']

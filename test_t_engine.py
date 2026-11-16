@@ -29,6 +29,12 @@ class TEngineTests(unittest.TestCase):
         a=self.call();b=self.call();row=a['rows'][0]
         self.assertEqual(row['phase'],'sell_ready');self.assertEqual(row['quantity'],100);self.assertGreaterEqual(row['gross_spread_estimate'],40)
         self.assertEqual(a['signals'][0]['id'],b['signals'][0]['id']);self.assertEqual(a['signals'][0]['category'],'t')
+    def test_exit_mode_blocks_both_new_t_and_buybacks(self):
+        cfg=deepcopy(self.cfg);cfg['execution_preferences']={'mode':'exit_only'}
+        self.assertEqual(self.call(cfg=cfg)['signals'],[])
+        args=self.buyback_fixture();args['cfg']['execution_preferences']={'mode':'exit_only'}
+        result=self.call(**args);self.assertEqual(result['signals'],[])
+        self.assertEqual(result['rows'][0]['phase'],'exit_only');self.assertIsNone(result['rows'][0]['target_buy'])
     def test_break_even_uses_product_tick_and_named_fee_basis(self):
         terms={'stock':{'commission_per_10k':5,'minimum_commission':5},
                'etf':{'commission_per_10k':1,'minimum_commission':0}}

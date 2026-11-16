@@ -8,6 +8,8 @@
   <link rel="icon" type="image/svg+xml" href="/static/hengshi-logo.svg">
   <link rel="stylesheet" href="/static/dashboard.css?v=3.6.1-strategy-v1">
   <script defer src="/static/dashboard.js?v=3.6.1-strategy-v1"></script>
+  <link rel="stylesheet" href="/static/action_center.css?v=1">
+  <script defer src="/static/action_center.js?v=1"></script>
 </head>
 <body>
   <aside class="sidebar">
@@ -42,9 +44,17 @@
   <main class="main">
     <header class="topbar"><div><h1>A股量化研究台 <span class="version">v3.6.1</span></h1><p>看持仓 · 查风险 · 做研究</p></div><div class="top-actions"><span id="clock" class="clock">—</span><button id="refresh" class="btn ghost">↻ 更新显示</button></div></header>
     <div id="toast" role="status" aria-live="polite" class="toast hidden"></div>
+    <div id="strong-alerts" class="strong-alerts" aria-live="polite"></div>
     <section id="overview">
       <div class="section-heading"><div><span class="eyebrow">01 / ACCOUNT OVERVIEW</span><h2>账户概览</h2></div><span id="data-badge" class="pill muted">数据状态待检查</span></div>
       <div id="data-note" class="data-note">尚未加载行情</div>
+      <div class="panel action-panel">
+        <div class="panel-head"><div><h3>当前行动 · 先核条件再执行</h3><p id="action-status">正在读取行情与持仓。</p></div><button class="btn ghost" id="action-refresh" type="button">更新行动卡</button></div>
+        <div class="action-controls"><label>账户模式 <select id="execution-mode"><option value="normal">正常观察（保留所有风控）</option><option value="exit_only">退出休息（暂停新增和做T）</option></select></label><label><input id="native-sound" type="checkbox">桌面通知带声音</label><button class="btn ghost" id="save-execution" type="button">保存模式与通知</button><button class="btn ghost" id="enable-action-sound" type="button">启用并试听网页声音</button><button class="btn ghost" id="mute-action-sound" type="button">关闭网页声音</button></div>
+        <p class="tip" id="action-sound-status">网页声音需点击启用；桌面通知需允许本机后台通知，休眠和断网时不能保证送达。</p>
+        <div id="action-cards" class="action-grid"></div><p class="tip" id="action-note"></p>
+        <p class="tip">数量是当前核验上限，卖价不保证成交。暂无条件时等待；未确认的计划请到“我的持仓”核对。</p>
+      </div>
       <div class="stats market-stats" aria-label="账户资产快照">
         <div class="stat hero-stat">
           <div class="hero-upper">
@@ -204,6 +214,7 @@
       <div class="panel"><div class="panel-head"><div><h3>逐只观察 · 为什么还没提醒</h3><p>逐项核对冲高回落、费用、当日可卖数量与接回风控。没有信号也显示等待原因；触到价格门槛不等于可以下单。</p></div></div><div id="t-observation-list" class="t-observation-grid">正在加载。</div></div>
       <div class="panel-head"><h3>本轮做T提醒</h3><span id="signal-t-badge" class="pill muted">未监测</span></div>
       <div id="signal-t-list" class="signal-list"></div>
+      <div class="panel"><h3>做T效果复盘 · 最近7个自然日</h3><div id="t-performance-summary">正在读取真实记录。</div><p class="tip">只统计真实登记成交；已配对净收益与未接回余量对比单独列示，不把卖出回笼资金当作利润。</p><a class="btn ghost" href="/backtest/validation">查看样本外验证</a><p class="tip" id="action-validation"></p></div>
       <div class="panel"><h3>本地做T记录</h3><p class="tip">有成交对账记录时可填该笔成交编号，复用数量、价格和费用。也可以直接填写真实成交，另在成交对账中同步持仓和现金。</p>
         <details class="disclosure"><summary>1 · 确认今日券商可卖数量</summary><form id="t-availability-form" class="t-entry-form"><label>证券<select name="code" required><option value="">选择持仓</option></select></label><label>今日可卖数量<input name="available_quantity" type="number" min="0" step="1" required></label><label class="t-confirm"><input name="availability_confirmed" type="checkbox" required>我已核对今天券商显示的可卖数量</label><button class="btn primary" type="submit">保存今日可卖数量</button></form><p class="tip">不能拿历史截图的可卖数量代替今日确认；可卖数量发生变化时重新核对。</p></details>
         <details class="disclosure"><summary>2 · 登记本轮实际T高抛</summary><form id="t-sell-form" class="t-entry-form"><label>证券<select name="code" required><option value="">选择持仓</option></select></label><label>已对账成交编号<input name="broker_fill_id" maxlength="180" placeholder="可填编号或录入下方成交"></label><label>实际卖出数量<input name="quantity" type="number" min="1" step="1"></label><label>实际卖出均价<input name="sell_price" type="number" min="0.0001" step="0.0001"></label><label>实付总费用与税费（元）<input name="fee" type="number" min="0" step="0.01" placeholder="未知可留空"></label><label class="t-confirm"><input name="sell_filled" type="checkbox" required>这笔T高抛已经在券商真实成交</label><button class="btn primary" type="submit">登记已成交T高抛</button></form><p class="tip">只登记明确用于本轮做 T 的成交。普通减仓和止损卖出可在成交对账登记。</p></details>
