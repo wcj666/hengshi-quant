@@ -329,6 +329,20 @@ def create_app(folder:Path=ROOT):
             return jsonify(error='区间对照报告损坏，请重新生成。'), 409
         return jsonify(report)
 
+    @app.route('/api/backtest/history-collection')
+    def history_collection_status():
+        from history_collection import SUBDIR, absent_status
+        status = strategy.read(output / SUBDIR / 'status.json')
+        return jsonify(status if isinstance(status, dict) and 'positions' in status else absent_status())
+
+    @app.route('/api/backtest/history-trial')
+    def history_collection_trial():
+        from history_collection import SUBDIR
+        report = strategy.read(output / SUBDIR / 'trial.json')
+        if not isinstance(report, dict) or 'coverage' not in report:
+            return jsonify(error='尚未生成真实历史行情试跑'), 404
+        return jsonify(report)
+
     @app.route('/api/backtest/reminder-validation')
     def reminder_validation_report():
         from reminder_validation import no_data

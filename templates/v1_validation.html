@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="/static/reminder_validation.css">
   <script src="/static/v1_validation.js" defer></script>
   <script src="/static/reminder_validation.js" defer></script>
+  <script src="/static/history_collection.js" defer></script>
 </head>
 <body>
 <main class="page">
@@ -19,6 +20,40 @@
     </div>
     <button id="refresh" type="button">刷新报告</button>
   </header>
+  <section id="history-collection" class="panel history-collection" aria-labelledby="history-collection-title">
+    <div class="section-head">
+      <div>
+        <h2 id="history-collection-title">真实历史行情积累</h2>
+        <p>追踪创业100和科创半导的腾讯日线与分钟行情。完整分钟、原始成交额和可回放证据分别统计。</p>
+      </div>
+    </div>
+    <p id="history-collection-status" class="status history-status" role="status">正在读取采集进度…</p>
+    <p id="history-collection-updated" class="subtle" hidden></p>
+    <div class="table-wrap" tabindex="0" aria-label="逐只历史行情覆盖">
+      <table>
+        <thead><tr>
+          <th scope="col">标的</th><th scope="col">原始日 K</th><th scope="col">有成交额的日 K</th>
+          <th scope="col">完整分钟天数</th><th scope="col">原始分钟额天数</th><th scope="col">量额匹配天数</th><th scope="col">可回放天数</th>
+          <th scope="col">最近归档交易日</th><th scope="col">待补证据</th>
+        </tr></thead>
+        <tbody id="history-collection-positions"></tbody>
+      </table>
+    </div>
+    <ul id="history-collection-warnings" class="limitations" hidden></ul>
+    <dl class="history-phases" id="history-collection-phases" hidden>
+      <div>
+        <dt>真实数据试跑</dt>
+        <dd id="history-collection-trial">等待采集</dd>
+        <dd id="history-collection-trial-summary" class="subtle" hidden></dd>
+        <dd><a id="history-collection-trial-link" hidden>查看试跑报告</a></dd>
+      </div>
+      <div>
+        <dt>正式分段验证</dt>
+        <dd id="history-collection-validation">待验证</dd>
+        <dd id="history-collection-validation-message" class="subtle" hidden></dd>
+      </div>
+    </dl>
+  </section>
   <section id="reminder-validation" class="panel reminder-validation" aria-labelledby="reminder-validation-title">
     <div class="section-head">
       <div>
