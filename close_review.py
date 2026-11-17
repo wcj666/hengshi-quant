@@ -143,46 +143,14 @@ def _exposure_summary(rows, equity, planned, available, group):
     return dict(sorted(totals.items(), key=lambda item: (-item[1]["value"], item[0])))
 
 
-def build_close_review(config, snapshot, quotes, candidates=None, *, asof=None,
-                       data_verified=False, quote_errors=None):
-    """Plan fixed exits first, then reduce concentrated and excess exposure."""
-    settings = strategy_prefs(config)
+def reduction_draft(rows, equity, settings):
+    """Size a risk-rule draft before imposing the final sellable-quantity cap."""
     max_position_pct = settings["max_position_pct"]
     max_exposure_pct = settings["max_exposure_pct"]
     max_sector_pct = settings["max_sector_pct"]
     max_positions = settings["max_positions"]
-    per_trade_risk = settings["per_trade_risk"]
-    fee_reserve = settings["fee_reserve"]
-    snapshot = snapshot or {}
-    quotes = _quote_map(quotes)
-    rows = _position_rows(config, snapshot, quotes)
-    cash = _number(snapshot.get("available_cash"))
-    withdrawable_cash = _number(snapshot.get("withdrawable_cash"))
-    if cash is None or withdrawable_cash is None or not 0 <= withdrawable_cash <= cash:
-        withdrawable_cash = None
-    complete = bool(snapshot and cash is not None and cash >= 0 and all(
-        row["quantity"] > 0 and row["price"] is not None and row["previous_close"] is not None
-        and row["source_timestamp"] for row in rows
-    ))
-    errors = list(quote_errors or [])
-    if not complete:
-        errors.append("账户快照或完整持仓行情缺失")
-
-    market_value = money(sum(row["value"] or 0 for row in rows)) if complete else None
-    equity = money(cash + market_value) if complete else None
-    can_plan = bool(complete and data_verified and equity > 0)
-    try:
-        clock = datetime.fromisoformat((asof or snapshot.get("asof") or "").replace("Z", "+00:00"))
-    except (ValueError, TypeError, AttributeError):
-        clock = None
-    target_reserve = money(max(equity * (1 - max_exposure_pct / 100.0),
-                               fee_reserve + 2 * per_trade_risk)) if can_plan else None
-    current_exposure_pct = money(market_value / equity * 100) if equity else None
-    sell_plan = []
-    pending_sell_plan = []
     requested_by_code = {}
     reasons_by_code = {}
-    positions = {row["code"]: row for row in rows}
 
     def add_sell(row, quantity, reason):
         requested = min(row["quantity"], quantity)
@@ -223,37 +191,77 @@ def build_close_review(config, snapshot, quotes, candidates=None, *, asof=None,
             row, quantity, _ = max(options, key=lambda item: (item[2], *relief(item[0], item[1], excess)))
             add_sell(row, planned(row) + quantity, reason)
 
+    triggered = [row for row in rows if row.get("fixed_exit", {}).get("trigger")]
+    priority = tuple(EXIT_LABELS)
+    for row in sorted(triggered, key=lambda item: priority.index(item["fixed_exit"]["trigger"])):
+        fixed = row["fixed_exit"]
+        add_sell(row, fixed["quantity"], fixed["reason"])
+
+    active = [row for row in rows if planned(row) < row["quantity"]]
+    for _ in range(max(0, len(active) - max_positions)):
+        row = max(active, key=lambda item: (
+            _sellable(item, item["quantity"]) == item["quantity"],
+            *relief(item, item["quantity"] - planned(item)),
+        ))
+        active.remove(row)
+        add_sell(row, row["quantity"], f"持仓数超过{max_positions:g}只，优先减少集中敞口")
+
+    position_cap = equity * max_position_pct / 100
+    for row in sorted(rows, key=remaining_value, reverse=True):
+        excess = remaining_value(row) - position_cap
+        if excess > 1e-8:
+            add_sell(row, _lot(planned(row) + excess / row["price"], up=True),
+                     f"单只市值超过{max_position_pct:g}%上限，降至约¥{position_cap:,.2f}以内")
+
+    sectors = sorted({row["sector"] for row in rows if row["sector"]})
+    for sector in sectors:
+        reduce_exposure([row for row in rows if row["sector"] == sector], equity * max_sector_pct / 100,
+                        f"{sector}行业敞口超过{max_sector_pct:g}%上限")
+    reduce_exposure(rows, equity * max_exposure_pct / 100,
+                    f"组合仓位超过{max_exposure_pct:g}%上限，优先减少集中敞口")
+
+    return requested_by_code, reasons_by_code
+
+
+def build_close_review(config, snapshot, quotes, candidates=None, *, asof=None,
+                       data_verified=False, quote_errors=None):
+    """Plan fixed exits first, then reduce concentrated and excess exposure."""
+    settings = strategy_prefs(config)
+    max_exposure_pct = settings["max_exposure_pct"]
+    max_sector_pct = settings["max_sector_pct"]
+    per_trade_risk = settings["per_trade_risk"]
+    fee_reserve = settings["fee_reserve"]
+    snapshot = snapshot or {}
+    quotes = _quote_map(quotes)
+    rows = _position_rows(config, snapshot, quotes)
+    cash = _number(snapshot.get("available_cash"))
+    withdrawable_cash = _number(snapshot.get("withdrawable_cash"))
+    if cash is None or withdrawable_cash is None or not 0 <= withdrawable_cash <= cash:
+        withdrawable_cash = None
+    complete = bool(snapshot and cash is not None and cash >= 0 and all(
+        row["quantity"] > 0 and row["price"] is not None and row["previous_close"] is not None
+        and row["source_timestamp"] for row in rows
+    ))
+    errors = list(quote_errors or [])
+    if not complete:
+        errors.append("账户快照或完整持仓行情缺失")
+
+    market_value = money(sum(row["value"] or 0 for row in rows)) if complete else None
+    equity = money(cash + market_value) if complete else None
+    can_plan = bool(complete and data_verified and equity > 0)
+    try:
+        clock = datetime.fromisoformat((asof or snapshot.get("asof") or "").replace("Z", "+00:00"))
+    except (ValueError, TypeError, AttributeError):
+        clock = None
+    target_reserve = money(max(equity * (1 - max_exposure_pct / 100.0),
+                               fee_reserve + 2 * per_trade_risk)) if can_plan else None
+    current_exposure_pct = money(market_value / equity * 100) if equity else None
+    sell_plan = []
+    pending_sell_plan = []
+    positions = {row["code"]: row for row in rows}
     for row in rows:
         row["fixed_exit"] = _fixed_exit(config, row, can_plan, clock)
-    if can_plan:
-        triggered = [row for row in rows if row["fixed_exit"].get("trigger")]
-        priority = tuple(EXIT_LABELS)
-        for row in sorted(triggered, key=lambda item: priority.index(item["fixed_exit"]["trigger"])):
-            fixed = row["fixed_exit"]
-            add_sell(row, fixed["quantity"], fixed["reason"])
-
-        active = [row for row in rows if planned(row) < row["quantity"]]
-        for _ in range(max(0, len(active) - max_positions)):
-            row = max(active, key=lambda item: (
-                _sellable(item, item["quantity"]) == item["quantity"],
-                *relief(item, item["quantity"] - planned(item)),
-            ))
-            active.remove(row)
-            add_sell(row, row["quantity"], f"持仓数超过{max_positions:g}只，优先减少集中敞口")
-
-        position_cap = equity * max_position_pct / 100
-        for row in sorted(rows, key=remaining_value, reverse=True):
-            excess = remaining_value(row) - position_cap
-            if excess > 1e-8:
-                add_sell(row, _lot(planned(row) + excess / row["price"], up=True),
-                         f"单只市值超过{max_position_pct:g}%上限，降至约¥{position_cap:,.2f}以内")
-
-        sectors = sorted({row["sector"] for row in rows if row["sector"]})
-        for sector in sectors:
-            reduce_exposure([row for row in rows if row["sector"] == sector], equity * max_sector_pct / 100,
-                            f"{sector}行业敞口超过{max_sector_pct:g}%上限")
-        reduce_exposure(rows, equity * max_exposure_pct / 100,
-                        f"组合仓位超过{max_exposure_pct:g}%上限，优先减少集中敞口")
+    requested_by_code, reasons_by_code = reduction_draft(rows, equity, settings) if can_plan else ({}, {})
 
     # Build the executable and pending portions after all constraints have been
     # evaluated. This keeps T+1 inventory from causing duplicate exposure cuts.

@@ -10,6 +10,8 @@
   <script defer src="/static/dashboard.js?v=3.6.1-strategy-v1"></script>
   <link rel="stylesheet" href="/static/action_center.css?v=2">
   <script defer src="/static/action_center.js?v=2"></script>
+  <link rel="stylesheet" href="/static/reduction_preview.css?v=1">
+  <script defer src="/static/reduction_preview.js?v=1"></script>
 </head>
 <body>
   <aside class="sidebar">
@@ -19,6 +21,7 @@
       <a href="#overview" class="nav-link active">◈ <span>账户总览</span></a>
       <a href="#risk" class="nav-link">◉ <span>我的持仓</span></a>
       <a href="#watch" class="nav-link">◎ <span>自选与分析</span></a>
+      <a href="#reduction-preview" class="nav-link">↘ <span>组合减仓预览</span></a>
       <a href="#daily-observe" class="nav-link">★ <span>每日观察</span><b class="nav-counter" id="nav-count-daily">0</b></a>
       <a href="/close-review" class="nav-link">◷ <span>收盘复盘</span></a>
       <a href="/trade-reconcile" class="nav-link">≡ <span>成交对账</span></a>
@@ -56,6 +59,37 @@
         <div id="action-cards" class="action-grid"></div><p class="tip" id="action-note"></p>
         <p class="tip">数量是当前核验上限，卖价不保证成交。暂无条件时等待；未确认的计划请到“我的持仓”核对。</p>
       </div>
+      <section class="panel reduction-preview" id="reduction-preview" aria-labelledby="reduction-preview-title">
+        <div class="panel-head">
+          <div>
+            <h3 id="reduction-preview-title">组合减仓预览</h3>
+            <p>选择持仓并调整拟卖数量，按同一批行情测算卖后现金和仓位。</p>
+          </div>
+          <button class="btn ghost" type="button" id="reduction-preview-refresh">刷新数据</button>
+        </div>
+        <p id="reduction-preview-status" class="reduction-status" role="status">正在读取持仓和估算行情。</p>
+        <p id="reduction-preview-source" class="tip"></p>
+        <div class="reduction-controls">
+          <button class="btn primary" type="button" id="reduction-preview-suggest" disabled>套用规则草案</button>
+          <button class="btn ghost" type="button" id="reduction-preview-clear" disabled>清空选择</button>
+          <span class="tip" id="reduction-preview-draft"></span>
+        </div>
+        <div class="reduction-table-wrap" tabindex="0" role="region" aria-label="组合减仓预览持仓表">
+          <table class="reduction-table">
+            <thead>
+              <tr>
+                <th scope="col">选入</th><th scope="col">证券</th><th scope="col">当前参考</th>
+                <th scope="col">券商可卖记录</th><th scope="col">拟卖股/份</th>
+                <th scope="col">卖后持仓</th><th scope="col">预计净回款</th>
+              </tr>
+            </thead>
+            <tbody id="reduction-preview-positions"></tbody>
+          </table>
+        </div>
+        <div id="reduction-preview-notes" class="reduction-details"></div>
+        <dl class="reduction-metrics" id="reduction-preview-metrics" hidden></dl>
+        <p class="tip">回款按参考价、每只一次卖出及预估费用计算。卖后现金为账户可用资金估算，可取金额以券商为准。草案只用于预览。</p>
+      </section>
       <div class="stats market-stats" aria-label="账户资产快照">
         <div class="stat hero-stat">
           <div class="hero-upper">

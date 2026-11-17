@@ -989,7 +989,7 @@ function showSection(id, scroll=true){
  const target=document.getElementById(id);
  const page=sections.find(section=>section===target||section.contains(target))||$('overview');
  sections.forEach(section=>{section.hidden=section!==page;});
- const selected=id==='chan-study'?'watch':page.id;
+ const selected=id==='chan-study'?'watch':id==='reduction-preview'?id:page.id;
  const active=document.querySelector(`.nav-link[href="#${selected}"]`);
  if(active?.closest('details'))active.closest('details').open=true;
  setActiveNav(selected);

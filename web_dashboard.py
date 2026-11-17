@@ -628,6 +628,28 @@ def create_app(folder:Path=ROOT):
             return '桌面提醒已提交给系统'
         return '条件已触发，桌面通知尚未提交'
 
+    @app.route('/api/reduction-preview', methods=['GET', 'POST'])
+    def reduction_preview_api():
+        from reduction_preview import build_reduction_preview
+
+        quantities = {}
+        if request.method == 'POST':
+            body = request.get_json(silent=True)
+            if not isinstance(body, dict) or not isinstance(body.get('quantities'), dict):
+                raise ValueError('请按证券代码提交预览卖出数量')
+            quantities = body['quantities']
+            if len(quantities) > 100:
+                raise ValueError('预览最多支持100个证券代码')
+        with WRITE_LOCK:
+            cfg = config()
+            state = intraday_state().get_json()
+            now = datetime.now(strategy.CST)
+            book = t_runtime.ledger(output, cfg, now=now)
+            book['fee_samples'] = t_runtime.fee_samples(cfg, book)
+            result = build_reduction_preview(cfg, state, book, quantities, now=now,
+                                             completed_day=strategy.latest_completed_day(output, now))
+        return jsonify(result)
+
     @app.route('/api/action-center')
     def action_center_api():
         from action_center import build_actions
