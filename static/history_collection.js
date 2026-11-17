@@ -112,7 +112,15 @@
     const warnings = cleanWarnings(data.warnings);
     const notes = id('warnings');
     notes.replaceChildren(...warnings.map(message => element('li', message)));
-    notes.hidden = !warnings.length;
+    const evidence = linkToReport(data.evidence_url);
+    if (evidence) {
+      const entry = element('li');
+      const link = element('a', '查看历史价位、除权核验与研究场景');
+      link.href = evidence;
+      entry.append(link);
+      notes.append(entry);
+    }
+    notes.hidden = !warnings.length && !evidence;
 
     const trial = data.trial || {};
     const validation = data.validation || {};

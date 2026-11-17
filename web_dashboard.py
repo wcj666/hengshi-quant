@@ -335,6 +335,12 @@ def create_app(folder:Path=ROOT):
         status = strategy.read(output / SUBDIR / 'status.json')
         return jsonify(status if isinstance(status, dict) and 'positions' in status else absent_status())
 
+    @app.route('/api/backtest/history-evidence')
+    def history_collection_evidence():
+        from history_collection import SUBDIR
+        records = strategy.read(output / SUBDIR / 'evidence.json')
+        return jsonify(records if isinstance(records, dict) else {})
+
     @app.route('/api/backtest/history-trial')
     def history_collection_trial():
         from history_collection import SUBDIR

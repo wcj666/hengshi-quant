@@ -54,6 +54,27 @@ class HistoryCollectionTests(unittest.TestCase):
         self.assertTrue(build_bundle(daily, archives, dates, settings, evidence)['securities']['159971']
                         ['sessions'][day]['corporate_action_clear'])
 
+    def test_retrospective_adjustment_facts_keep_actual_check_time_and_require_corroboration(self):
+        from history_collection import _confirmed_actions
+
+        day = '2026-11-16'
+        now = datetime(2026, 11, 17, 15, tzinfo=CST)
+        record = {'clear': True, 'source': '官方基金产品和分红拆分档案核验',
+                  'basis': 'reference_price_and_published_action_crosscheck',
+                  'checked_at': now.isoformat(), 'reference_price_unchanged': True,
+                  'same_date_reference': .852, 'previous_raw_close': .852,
+                  'reference_sha256': 'a' * 64,
+                  'provenance': [{'url': 'https://example.com/fund', 'sha256': 'b' * 64},
+                                 {'url': 'https://example.com/actions', 'sha256': 'c' * 64}]}
+        evidence = {'corporate_actions': {'159971': {day: record}}}
+        self.assertTrue(_confirmed_actions(evidence, '159971', day, now))
+        self.assertNotIn('recorded_at', record)
+        record['previous_raw_close'] = .85
+        self.assertFalse(_confirmed_actions(evidence, '159971', day, now))
+        record['previous_raw_close'] = .852
+        record['checked_at'] = '2026-11-18T10:00:00+08:00'
+        self.assertFalse(_confirmed_actions(evidence, '159971', day, now))
+
     def test_repeat_basket_registration_preserves_earliest_proof(self):
         now = datetime(2026, 11, 17, 14, tzinfo=CST)
         with TemporaryDirectory() as root:

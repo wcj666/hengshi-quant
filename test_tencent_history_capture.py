@@ -5,7 +5,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from pathlib import Path
 
-from tencent_history_capture import capture_day, normalize_market_day, REGULAR, CN
+from tencent_history_capture import capture_day, normalize_market_day, session_from_evidence, REGULAR, CN
 
 
 DAY = '2026-11-16'
@@ -36,6 +36,19 @@ def responses():
 
 def entry(kline, turnover):
     return normalize_market_day(CODE, DAY, AFTER_CLOSE, kline=kline, turnover=turnover)
+
+
+def historical_evidence():
+    return dict(code=CODE, day=DAY, source='交易所逐日原始行情示例', checked_at=AFTER_CLOSE.isoformat(),
+                open='.8', close='.8', previous_close='.79', high='.8', low='.8',
+                upper_limit='.948', lower_limit='.632')
+
+
+def prior_archive():
+    kline, turnover = responses()
+    for item in (kline, turnover):
+        item['data'][SYMBOL]['qt'][SYMBOL][30] = '20261117160000'
+    return entry(kline, turnover)
 
 
 class TencentHistoryCaptureTests(unittest.TestCase):
@@ -82,6 +95,46 @@ class TencentHistoryCaptureTests(unittest.TestCase):
             self.assertIsNone(report['session'])
             self.assertEqual(report['amount_count'], 240)
             self.assertEqual(len(report['raw_sha256']['m1']), 64)
+
+    def test_historical_limits_add_only_checked_quote_using_intact_raw_evidence(self):
+        archive = prior_archive()
+        raw = archive['raw_responses']
+        evidence = historical_evidence()
+        historical = normalize_market_day(CODE, DAY, AFTER_CLOSE, kline=raw['m1'], turnover=raw['day'],
+                                          historical_quote=evidence)
+        self.assertEqual(historical['quote']['source'], evidence['source'])
+        self.assertEqual(historical['quote']['checked_at'], evidence['checked_at'])
+        self.assertNotIn('source_timestamp', historical['quote'])
+        session = session_from_evidence(archive, evidence, AFTER_CLOSE)
+        self.assertEqual(session, historical['session'])
+        self.assertEqual(session['upper_limit'], .948)
+        self.assertEqual(len(session['minutes']), 240)
+        self.assertFalse(session['corporate_action_clear'])
+        self.assertIsNone(archive['session'])
+        self.assertEqual(historical['raw_sha256'], archive['raw_sha256'])
+
+    def test_historical_quote_rejects_invalid_date_provenance_and_price_evidence(self):
+        archive = prior_archive()
+        for replacement in (
+            dict(day='2026-11-17'), dict(code='159971'), dict(source=''),
+            dict(checked_at='2026-11-16T15:15:00+08:00'), dict(checked_at='2026-11-16T15:02:00'),
+            dict(checked_at='2026-11-16T14:59:00+08:00'), dict(open='.799', low='.799'),
+            dict(close='.801', high='.801'), dict(high='.799'), dict(upper_limit='.799'),
+            dict(previous_close=0), dict(lower_limit=True),
+        ):
+            with self.subTest(replacement=replacement):
+                self.assertIsNone(session_from_evidence(archive, {**historical_evidence(), **replacement},
+                                                        AFTER_CLOSE))
+        archive['raw_responses']['m1']['data'][SYMBOL]['m1'][10][5] = '99'
+        self.assertIsNone(session_from_evidence(archive, historical_evidence(), AFTER_CLOSE))
+
+    def test_historical_evidence_never_overrides_same_day_tencent_limits(self):
+        kline, turnover = responses()
+        result = normalize_market_day(CODE, DAY, AFTER_CLOSE, kline=kline, turnover=turnover,
+                                      historical_quote={**historical_evidence(), 'lower_limit': '.7'})
+        self.assertEqual(result['session']['lower_limit'], .632)
+        self.assertIn('source_timestamp', result['quote'])
+        self.assertNotIn('checked_at', result['quote'])
 
     def test_capture_has_exact_path_reuses_complete_archive_and_gates_close(self):
         with TemporaryDirectory() as tmp:

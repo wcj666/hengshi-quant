@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from datetime import date, datetime, time
+from math import isfinite
 import fcntl
 import hashlib
 import json
@@ -74,13 +75,31 @@ def _archive(work, codes, calendar):
     return result
 
 
-def _confirmed_actions(evidence, code, day):
+def _confirmed_actions(evidence, code, day, now=None):
     records = _mapping(_mapping(evidence.get('corporate_actions')).get(code))
     row = _mapping(records.get(day))
     stamp = parse_provider_time(row.get('recorded_at'))
     opened = datetime.combine(date.fromisoformat(day), time(9, 30), CST)
-    return bool(row.get('clear') is True and isinstance(row.get('source'), str) and row['source'].strip()
-                and stamp and stamp <= opened)
+    if row.get('clear') is not True or not isinstance(row.get('source'), str) or not row['source'].strip():
+        return False
+    if stamp and stamp <= opened:
+        return True
+    # The date of a mechanical market adjustment can be established later from
+    # published records. Keep the real check time separate from a trading review.
+    now = now or datetime.now(CST)
+    checked = parse_provider_time(row.get('checked_at'))
+    close = opened.replace(hour=15, minute=0)
+    reference, prior = row.get('same_date_reference'), row.get('previous_raw_close')
+    provenance = row.get('provenance')
+    return bool(row.get('basis') == 'reference_price_and_published_action_crosscheck'
+                and checked and close <= checked <= now and row.get('reference_price_unchanged') is True
+                and type(reference) in (int, float) and type(prior) in (int, float)
+                and isfinite(reference) and 0 < reference == prior
+                and isinstance(row.get('reference_sha256'), str) and re.fullmatch(r'[a-f0-9]{64}', row['reference_sha256'])
+                and isinstance(provenance, list) and len(provenance) >= 2
+                and all(isinstance(item, dict) and isinstance(item.get('url'), str)
+                        and isinstance(item.get('sha256'), str) and re.fullmatch(r'[a-f0-9]{64}', item['sha256'])
+                        for item in provenance))
 
 
 def _true_reviews(evidence, code, days):
@@ -99,8 +118,13 @@ def _true_reviews(evidence, code, days):
 
 def _eligible_sessions(archive, evidence, code):
     rows = {}
+    from tencent_history_capture import session_from_evidence
+
+    quotes = _mapping(_mapping(evidence.get('historical_quotes')).get(code))
     for day, item in archive.items():
         session = item.get('session')
+        if not isinstance(session, dict) and day in quotes:
+            session = session_from_evidence(item, quotes[day], datetime.now(CST))
         if not isinstance(session, dict):
             continue
         normalized = {**session, 'corporate_action_clear': _confirmed_actions(evidence, code, day)}
@@ -135,8 +159,20 @@ def describe_positions(settings, daily, archives, bundle):
         code = item['code']
         days = archives[code]
         sessions = (bundle or {}).get('securities', {}).get(code, {}).get('sessions', {})
-        details = Counter(message for row in days.values() for message in row.get('blockers', [])
-                          if isinstance(message, str))
+        details = Counter()
+        for day, archive in days.items():
+            session = sessions.get(day)
+            for message in archive.get('blockers', []):
+                if not isinstance(message, str):
+                    continue
+                if session and (message.startswith('腾讯原始涨跌停价') or message.startswith('缺少可核验的当日涨跌停')):
+                    continue
+                if session and session.get('corporate_action_clear') and message.startswith('公司行动或除权状态'):
+                    continue
+                details[message] += 1
+        supplemented = sum(session.get('corporate_action_clear') is True for session in sessions.values())
+        if supplemented:
+            details[f'已补 {supplemented} 日涨跌停及当日除权参考价证据（含回顾性核验）'] += 1
         if not any(s.get('corporate_action_clear') for s in sessions.values()):
             details['待补有日期与出处的公司行动/除权核验证据'] += 1
         if not (bundle or {}).get('securities', {}).get(code, {}).get('reviews'):
@@ -152,15 +188,19 @@ def describe_positions(settings, daily, archives, bundle):
     return result
 
 
-def run_trial(bundle, settings, completed, work):
+def run_trial(bundle, settings, completed, work, *, start=None, end=None):
     from t_history_replay import evaluate_t_window
 
     if not completed or not bundle['benchmark'] or any(not item['daily'] for item in bundle['securities'].values()):
         return {'status': '真实日线不足，等待数据'}
-    start, end = completed[-min(4, len(completed))], completed[-1]
+    start = start or completed[-min(4, len(completed))]
+    end = end or completed[-1]
     result = run_backtest(bundle, start, end, settings['initial_equity'])
     coverage = audit_coverage(bundle, start, end)
     t_result = evaluate_t_window(bundle, start, end, settings['initial_equity'], result['meta']['costs'])
+    scenario = bundle.get('t_replay') or {}
+    if scenario.get('start_on', '') > end:
+        t_result['warnings'] = [f'该历史区间早于已登记的实验起点 {scenario["start_on"]}，后续从起点开始积累。']
     summary = result['summary']
     ready = (summary['execution_coverage_complete'] and summary['valuations_complete']
              and not any(coverage.get(key) for key in ('missing_sessions', 'partial_minute_sessions',
@@ -170,6 +210,9 @@ def run_trial(bundle, settings, completed, work):
         'label': '关注篮子的真实行情试跑。回顾性选样，不用于正式筛选。',
         'start': start, 'end': end, 'source': bundle['source'], 'coverage': coverage,
         'execution_verified': ready, 'summary': compact, 'decisions': result['decisions'],
+        'technical_signal_count': summary['technical_signal_count'],
+        'reminders': result['reminders'],
+        'mechanical_evidence_note': '机械行情事实允许事后查证并保留真实核验时间；交易审核及实验底仓仍保留其实际设定时间。',
         't': t_result,
     })
     return {'status': '已用真实行情试跑' if ready else '已试跑，执行证据不足',
@@ -273,14 +316,21 @@ def collect(runtime_output, settings, work, now, *, lookback=4, fetch=True):
             warnings.append(f'{code} 尚无 {completed[-1]} 已核验日线，已有日线保留。')
     archives = _archive(work, codes, completed)
     evidence = _read_dict(work/'evidence.json')
-    if not evidence.get('t_replay'):
+    scenario = _mapping(evidence.get('t_replay'))
+    if not scenario:
         warnings.append('做 T 实验缺事前留存的底仓与固定退出证据。本次只锁定观察证券，不从当前持仓反推历史。')
+    elif scenario.get('start_on'):
+        detail = '；'.join(f'{row["code"]} {row["quantity"]:,}份，固定退出 {row["stop_loss"]:.3f}'
+                          for row in scenario.get('positions', []))
+        warnings.append(f'做 T 研究场景已登记，起点 {scenario["start_on"]}。{detail}。'
+                        f'虚拟期初净资产 ¥{settings["initial_equity"]:,.2f}。')
     bundle = build_bundle(daily, archives, completed, settings, evidence)
     trial = run_trial(bundle, settings, completed, work)
     validation = auto_validate(bundle, settings, work, runtime_output)
     return {'status': '已更新腾讯历史行情归档与证据检查', 'updated_at': now.isoformat(),
             'latest_completed_day': completed[-1], 'positions': describe_positions(settings, daily, archives, bundle),
-            'warnings': warnings, 'trial': trial, 'validation': validation}
+            'warnings': warnings, 'evidence_url': '/api/backtest/history-evidence',
+            'trial': trial, 'validation': validation}
 
 
 def main():

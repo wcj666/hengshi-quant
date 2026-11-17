@@ -167,6 +167,36 @@ def _quote(payload, symbol, code, day, now):
             'upper_limit': float(upper), 'lower_limit': float(lower), 'source_timestamp': at.isoformat()}
 
 
+def _historical_quote(evidence, code, day, now, k_rows):
+    """Accept dated records from a separately verified historical source."""
+    if not isinstance(evidence, dict) or evidence.get('code') != code or evidence.get('day') != day:
+        raise ValueError('历史涨跌停证据的代码或交易日不匹配')
+    source = evidence.get('source')
+    if not isinstance(source, str) or not source.strip():
+        raise ValueError('历史涨跌停证据缺少出处')
+    try:
+        checked = datetime.fromisoformat(evidence.get('checked_at'))
+        close_at = datetime.combine(date.fromisoformat(day), time(15), CN)
+        if checked.tzinfo is None or now.tzinfo is None or not close_at <= checked <= now:
+            raise ValueError
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError('历史涨跌停证据须记录收盘后至当前的带时区核验时间') from None
+
+    fields = ('open', 'close', 'previous_close', 'high', 'low', 'upper_limit', 'lower_limit')
+    prices = {key: _number(evidence.get(key)) for key in fields}
+    opened, closed, prior, high, low, upper, lower = prices.values()
+    if not (prior > 0 and 0 < lower <= low <= min(opened, closed) <= max(opened, closed) <= high <= upper
+            and lower < upper):
+        raise ValueError('历史涨跌停证据的日线价格或边界关系无效')
+    opening_bar = k_rows.get('0930') or k_rows.get('0931')
+    closing_bar = k_rows.get('1500')
+    if (not opening_bar or not closing_bar or opening_bar['open'] != opened or closing_bar['close'] != closed
+            or any(not low <= bar['low'] <= bar['high'] <= high for bar in k_rows.values())):
+        raise ValueError('历史涨跌停证据与已归档分钟开收盘价或高低价不符')
+    return {'code': code, 'day': day, 'source': source.strip(), 'checked_at': checked.astimezone(CN).isoformat(),
+            **{key: float(value) for key, value in prices.items()}}
+
+
 def _atomic(path, record):
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     temporary = None
@@ -186,7 +216,7 @@ def _fingerprint(payload):
     return sha256(canonical.encode()).hexdigest()
 
 
-def normalize_market_day(code, day, now, *, kline=None, turnover=None, errors=()):
+def normalize_market_day(code, day, now, *, kline=None, turnover=None, historical_quote=None, errors=()):
     """Join only mutually supported bars and keep the unmodified observations."""
     symbol = _tencent_symbol(code)
     blockers = list(errors)
@@ -264,6 +294,11 @@ def normalize_market_day(code, day, now, *, kline=None, turnover=None, errors=()
             break
         except (TypeError, ValueError, OverflowError) as error:
             quote_errors.append(str(error))
+    if quote is None and historical_quote is not None:
+        try:
+            quote = _historical_quote(historical_quote, code, day, now, k_rows)
+        except (TypeError, ValueError, OverflowError) as error:
+            quote_errors.append(str(error))
     if quote is None:
         blockers.extend(dict.fromkeys(quote_errors or ['缺少可核验的当日涨跌停档案']))
     session = None
@@ -285,6 +320,24 @@ def normalize_market_day(code, day, now, *, kline=None, turnover=None, errors=()
             'blockers': blockers, 'sources': {'m1': KLINE_URL, 'day': TURNOVER_URL},
             'raw_sha256': {kind: _fingerprint(payload) for kind, payload in raw.items()},
             'raw_responses': raw}
+
+
+def session_from_evidence(archive, evidence, now):
+    """Rebuild a session without modifying the archived provider responses."""
+    if (not isinstance(archive, dict) or archive.get('format') != FORMAT or archive.get('version') != 1
+            or not isinstance(archive.get('code'), str) or not re.fullmatch(r'\d{6}', archive['code'])
+            or not isinstance(archive.get('day'), str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}', archive['day'])):
+        return None
+    raw, digests = archive.get('raw_responses'), archive.get('raw_sha256')
+    if not isinstance(raw, dict) or not isinstance(digests, dict) or not raw or raw.keys() != digests.keys():
+        return None
+    try:
+        if any(_fingerprint(payload) != digests[key] for key, payload in raw.items()):
+            return None
+        return normalize_market_day(archive['code'], archive['day'], now, kline=raw.get('m1'),
+                                    turnover=raw.get('day'), historical_quote=evidence)['session']
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def _load(path, day, code):
