@@ -21,7 +21,7 @@ from risk_engine import compute
 from trade_levels import make_levels
 from market_context import current_auction_phase, get_auction, get_global
 from trade_signals import build_signals
-from quote_health import assess
+from quote_health import assess, parse_provider_time
 from risk_extensions import tier_alerts,risk_level
 from portfolio_journal import record_equity
 from account_snapshot import save_display_snapshot
@@ -283,6 +283,41 @@ def journal_diagnostics(cfg, quotes, snapshot, active_signals, now):
     return blocked
 
 
+def inactive_alert_reason(row, quotes, state, diagnostics, now):
+    if row.get('config_hash') and row['config_hash'] != state.get('config_hash'):
+        return '持仓或设置已更新，原提醒随旧台账失效。'
+    if (state.get('quote_health') or {}).get('block_trade_signals'):
+        return '持仓行情未通过校验，本轮暂停交易提醒。'
+    code, trigger = row.get('code'), row.get('trigger')
+    quote = quotes.get(code, {})
+    price = valid_price(quote.get('price'))
+    stamp = parse_provider_time(quote.get('source_timestamp'))
+    if code != 'PORT' and (price is None or not stamp or stamp.astimezone(CST).date() != now.date()
+                           or not 0 <= (now - stamp).total_seconds() <= 90):
+        return '该证券的报价缺失或过期，原提醒撤销。'
+    level = valid_price(row.get('level'))
+    if trigger == 'v1_entry' and price is not None:
+        cap = valid_price(row.get('entry_cap'))
+        if cap is not None and price > cap:
+            return f'报价 {price:g} 已超过原计划最高接受价 {cap:g}。'
+        if level is not None and price < level:
+            return f'报价 {price:g} 已跌回原买入触发价 {level:g} 下方。'
+    if price is not None and level is not None:
+        if trigger in ('stop', 'breakdown') and price > level:
+            return f'报价 {price:g} 已离开原触发价 {level:g} 的下方区间。'
+        if trigger in ('take_profit_1', 'take_profit_2') and price < level:
+            return f'报价 {price:g} 已回落至原止盈参考 {level:g} 下方。'
+    if row.get('category') == 't':
+        observations = (state.get('t_observe') or {}).get('rows', [])
+        current = next((item for item in observations if item.get('code') == code), None)
+        if current and current.get('reason'):
+            return current['reason']
+    blocked = next((s for s in diagnostics if s.get('code') == code and s.get('trigger') == trigger), None)
+    if blocked and blocked.get('blockers'):
+        return '；'.join(blocked['blockers'])
+    return '后续轮询未再满足原提醒条件，未记录更具体的失效原因。'
+
+
 def single_cycle(*,mode,notify=False,force_demo=False,probe=False,interval=10):
     cycle_started_monotonic=time.monotonic()
     now=now_cn();cfg=load_config(ROOT/'config.json')
@@ -342,8 +377,23 @@ def single_cycle(*,mode,notify=False,force_demo=False,probe=False,interval=10):
     try:
         watch_due=not prev_watch or (now-dt.datetime.fromisoformat(prev_watch).astimezone(CST)).total_seconds()>=60
     except (TypeError,ValueError):watch_due=True
+    close_targets = set()
+    quote_cfg = cfg
+    close_day = now.date().isoformat()
+    if reference_only and not probe and minute >= 905:
+        from t_close_marks import capture_marks, load_marks, quote_targets
+        try:
+            close_targets = quote_targets(t_runtime.ledger(OUT, cfg, now=now), close_day)
+            saved = load_marks(OUT, close_day, now)
+            held = {(p['type'], code_str(p['code'])) for p in cfg.get('positions', []) if p['quantity'] > 0}
+            extra = [{'code': code, 'type': kind, 'quantity': 1}
+                     for kind, code in sorted(close_targets - held) if code not in saved]
+            if extra:
+                quote_cfg = {**cfg, 'positions': cfg['positions'] + extra}
+        except (ValueError, TypeError, KeyError, OSError) as exc:
+            state['errors'].append(f'做 T 收盘标的读取失败：{exc}')
     if demo:feed,errors=example_quotes(cfg)
-    else:feed,errors=snapshot_selected_akshare(cfg,include_watch=watch_due)
+    else:feed,errors=snapshot_selected_akshare(quote_cfg,include_watch=watch_due)
     state['watchlist_fetched_at']=now.isoformat() if watch_due else prev_watch
     state['watchlist_refresh_seconds']=60
     health=assess(cfg,feed,prior_state if prior_state.get('config_hash')==cfg_hash else {},
@@ -358,7 +408,12 @@ def single_cycle(*,mode,notify=False,force_demo=False,probe=False,interval=10):
         for position in cfg.get('positions',[]):
             code=code_str(position['code'])
             if code in health['invalid_jump']:feed.pop((position['type'],code),None)
-    state['errors']=errors
+    state['errors'].extend(errors)
+    if close_targets:
+        try:
+            capture_marks(OUT, close_day, now_cn(), close_targets, feed, QUOTE_SOURCE)
+        except (ValueError, OSError) as exc:
+            state['errors'].append(f'做 T 收盘价归档失败：{exc}')
     account={}
     if strategy.enabled(cfg) and not demo and not probe:
         strategy.refresh_evidence_async(OUT,cfg)
@@ -433,9 +488,11 @@ def single_cycle(*,mode,notify=False,force_demo=False,probe=False,interval=10):
         try:
             recording_signals = []
             recording_events = []
+            diagnostics = []
             if not no_required_prices and not health['block_trade_signals']:
                 recording_events = events
-                recording_signals = active_signals + journal_diagnostics(cfg, quotes, state, active_signals, journal_clock)
+                diagnostics = journal_diagnostics(cfg, quotes, state, active_signals, journal_clock)
+                recording_signals = active_signals + diagnostics
             else:
                 gaps = ['、'.join(health.get(key, [])) for key in
                         ('missing', 'stale_source', 'unverified_source', 'invalid_jump', 'suspected_freeze')]
@@ -454,6 +511,8 @@ def single_cycle(*,mode,notify=False,force_demo=False,probe=False,interval=10):
                 now=journal_clock, notify=notify and not health['block_trade_signals'],
                 send=lambda row:native_notice({**row,'sound':row.get('repeatable') is True and (cfg.get('execution_preferences') or {}).get('native_sound') is True}),
                 clock=now_cn, trades=cfg.get('reconciled_trades',[]),
+                inactive_reason=lambda row: inactive_alert_reason(
+                    row, quotes, state, diagnostics, journal_clock),
             )
             if archived['attempted']:
                 state['notifications_attempted']=archived['attempted']

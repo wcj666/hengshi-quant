@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import unittest
 
-from t_performance import build_review
+from t_performance import build_close_review, build_review
 
 
 class TPerformanceTests(unittest.TestCase):
@@ -131,6 +131,83 @@ class TPerformanceTests(unittest.TestCase):
         before = deepcopy((book, quotes))
         build_review(book, quotes, self.now)
         self.assertEqual((book, quotes), before)
+
+    def close_review(self, *cycles, when=None, mark=None, day=None):
+        clock = when or self.now.replace(hour=16)
+        return build_close_review({'cycles': list(cycles)}, (day or self.now.date()).isoformat(), mark, clock)
+
+    def close_quote(self, price=8, when=None):
+        stamp = when or self.now.replace(hour=15, minute=0)
+        return {'159971': {'price': price, 'source_timestamp': stamp.isoformat()}}
+
+    def test_close_combines_actual_paired_profit_and_unmatched_valuation_separately(self):
+        report = self.close_review(self.cycle(paired=50, status='open'), mark=self.close_quote())
+        row = report['rows'][0]
+        self.assertEqual(row['paired_buy_price'], 9)
+        self.assertEqual(row['paired_fee_actual'], 4)
+        self.assertEqual(row['paired_net_actual'], 46)
+        self.assertEqual(row['unmatched_quantity'], 50)
+        self.assertEqual(row['unmatched_sell_fee_actual'], 1)
+        self.assertEqual(row['unmatched_comparison'], 99)
+        self.assertEqual(row['net_vs_hold'], 145)
+        self.assertEqual(report['summary']['net_vs_hold'], 145)
+        self.assertEqual(report['summary']['net_status'], 'complete')
+
+    def test_full_pair_at_a_loss_with_zero_fees_needs_no_mark(self):
+        row = self.close_review(self.cycle(buy_price=11, sell_fee=0, buy_fee=0))['rows'][0]
+        self.assertEqual(row['paired_fee_actual'], 0)
+        self.assertEqual(row['unmatched_quantity'], 0)
+        self.assertIsNone(row['unmatched_comparison'])
+        self.assertEqual(row['net_vs_hold'], -100)
+
+    def test_missing_fee_and_missing_mark_block_total_even_when_other_parts_are_known(self):
+        missing_fee = self.close_review(self.cycle(paired=50, status='cash', buy_fee=None), mark=self.close_quote())
+        self.assertIsNone(missing_fee['rows'][0]['paired_net_actual'])
+        self.assertEqual(missing_fee['rows'][0]['paired_net_estimate'], 30)
+        self.assertEqual(missing_fee['rows'][0]['unmatched_comparison'], 99)
+        self.assertIsNone(missing_fee['summary']['net_vs_hold'])
+
+        missing_mark = self.close_review(self.cycle(paired=50, status='open'))
+        self.assertEqual(missing_mark['summary']['paired_net_actual'], 46)
+        self.assertIsNone(missing_mark['summary']['unmatched_comparison'])
+        self.assertEqual(missing_mark['summary']['net_status'], 'incomplete')
+
+    def test_does_not_mark_from_intraday_other_date_or_future_provider_stamp(self):
+        sale = self.cycle(paired=0, status='cash')
+        for stamp in (self.now, self.now - timedelta(days=1), self.now + timedelta(days=1),
+                      self.now.replace(hour=16, minute=59)):
+            with self.subTest(stamp=stamp):
+                row = self.close_review(sale, mark=self.close_quote(when=stamp))['rows'][0]
+                self.assertIsNone(row['unmatched_price'])
+                self.assertIsNone(row['net_vs_hold'])
+        historical = self.close_review(sale, when=self.now.replace(hour=16) + timedelta(days=1),
+                                       mark=self.close_quote())
+        self.assertEqual(historical['summary']['net_vs_hold'], 198)
+        self.assertIsNone(historical['summary']['paired_net_actual'])
+
+    def test_report_for_no_samples_or_before_close_has_no_estimated_total(self):
+        empty = self.close_review(self.cycle(day=self.now.date()-timedelta(days=1)))
+        self.assertEqual(empty['summary']['net_status'], 'no_samples')
+        self.assertIsNone(empty['summary']['net_vs_hold'])
+        intraday = self.close_review(self.cycle(), when=self.now)
+        self.assertEqual(intraday['summary']['net_status'], 'waiting_close')
+        self.assertIsNone(intraday['summary']['net_vs_hold'])
+
+    def test_duplicate_linked_broker_fills_or_invalid_cycles_prevent_day_total(self):
+        first, conflicting, valid = (self.cycle(ident) for ident in ('first', 'conflicting', 'valid'))
+        first['sell_fill_id'] = conflicting['sell_fill_id'] = 'broker-sell-001'
+        result = self.close_review(first, conflicting, valid)
+        self.assertEqual([row['id'] for row in result['rows']], ['valid'])
+        self.assertEqual(result['summary']['excluded_invalid_cycles'], 2)
+        self.assertEqual(result['summary']['paired_net_actual'], 95)
+        self.assertIsNone(result['summary']['net_vs_hold'])
+
+        broken = self.cycle('broken')
+        broken['buyback_cost'] = 1
+        result = self.close_review(broken, valid)
+        self.assertEqual(result['summary']['excluded_invalid_cycles'], 1)
+        self.assertEqual(result['summary']['net_status'], 'incomplete')
+        self.assertIsNone(result['summary']['net_vs_hold'])
 
 
 if __name__ == '__main__':

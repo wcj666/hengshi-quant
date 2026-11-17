@@ -848,7 +848,55 @@ def create_app(folder:Path=ROOT):
 
     @app.route('/close-review')
     def close_review_page():
-        return render_template('close_review.html')
+        return render_template('close_review.html', csrf=CSRF)
+
+    @app.route('/api/close-execution-review')
+    def close_execution_review_api():
+        from alert_journal import close_review_day, load_close_review, review_days
+        from t_close_marks import load_marks
+        from t_performance import build_close_review as build_t_close_review
+
+        now = datetime.now(strategy.CST)
+        with WRITE_LOCK:
+            cfg = config()
+            book = t_runtime.ledger(output, cfg, now=now)
+        latest = strategy.latest_completed_day(output, now)
+        days = set(review_days(output))
+        days.update(row['date'] for row in book.get('cycles', []) if isinstance(row.get('date'), str))
+        if latest:
+            days.add(latest)
+        available = []
+        for item in sorted(days, reverse=True):
+            try:
+                available.append(close_review_day(item, now))
+            except ValueError:
+                continue
+        selected = request.args.get('day')
+        day = close_review_day(selected, now) if selected is not None else latest or next(iter(available), None)
+        if day is None:
+            return jsonify(day=None, available_days=[], status='等待最近完整交易日或本地复盘记录',
+                           alerts={'summary': {}, 'rows': []},
+                           t_review={'summary': {'cycle_count': 0, 'net_status': 'no_samples'}, 'rows': [], 'notes': []})
+        snapshot = load_display_snapshot(output/'last_account_snapshot.json', cfg)
+        marks = load_marks(output, day, now, snapshot)
+        alerts = load_close_review(output, day, cfg.get('reconciled_trades', []), now=now)
+        t_review = build_t_close_review(book, day, marks, now=now)
+        status = ('读取到本地提醒或实际做 T 记录' if alerts['rows'] or t_review['rows'] else
+                  '该日暂无盘中提醒及实际做 T 记录')
+        return jsonify(day=day, available_days=available[:90], status=status, alerts=alerts, t_review=t_review)
+
+    @app.route('/api/close-execution-review/<ident>', methods=['POST'])
+    def save_close_execution_review(ident):
+        from alert_journal import record_close_review
+
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            raise ValueError('复盘标记格式无效')
+        with WRITE_LOCK:
+            cfg = config()
+            result = record_close_review(output, ident, body.get('day'), body.get('outcome'), body.get('reason'),
+                                         cfg.get('reconciled_trades', []))
+        return jsonify(ok=True, review=result, message='复盘标记已更新')
 
     @app.route('/api/close-review')
     def close_review_api():

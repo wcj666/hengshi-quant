@@ -4,14 +4,52 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>收盘复盘 · 衡势</title>
   <link rel="icon" href="/static/hengshi-logo.svg">
-  <link rel="stylesheet" href="/static/close_review.css">
+  <meta name="csrf-token" content="{{ csrf }}">
+  <link rel="stylesheet" href="/static/close_review.css?v=2">
   <script src="/static/close_review.js" defer></script>
+  <script src="/static/close_execution_review.js?v=1" defer></script>
 </head>
 <body><main>
   <header>
     <div class="brand"><img src="/static/hengshi-logo.svg" alt="衡势"><div><span>衡势 · 工作日盘后复盘</span><h1>收盘复盘与次日计划</h1></div></div>
     <div class="actions"><a href="/">返回研究台</a><button id="refresh" type="button">重新核验行情</button></div>
   </header>
+  <section class="panel execution-panel" id="execution-review" aria-labelledby="execution-review-title">
+    <div class="execution-heading">
+      <div>
+        <h2 id="execution-review-title">盘中提醒逐条复盘</h2>
+        <p>按提醒核对实际成交、主动跳过、错过和失效的原因。</p>
+      </div>
+      <div class="execution-controls">
+        <label>复盘日期 <input type="date" id="execution-review-date"></label>
+        <label id="execution-history-picker" hidden>历史记录 <select id="execution-review-history"></select></label>
+        <button id="execution-review-refresh" type="button">刷新复盘</button>
+      </div>
+    </div>
+    <p id="execution-review-status" class="execution-status" role="status">正在读取提醒和成交记录…</p>
+    <p id="execution-review-feedback" class="execution-feedback" role="status" hidden></p>
+    <ul id="execution-review-summary" class="execution-counts" aria-label="提醒结果统计"></ul>
+    <div class="scroll" tabindex="0" role="region" aria-label="盘中提醒逐条复盘表">
+      <table class="execution-table">
+        <thead><tr><th scope="col">提醒时间 / 通知</th><th scope="col">证券 / 提醒</th>
+          <th scope="col">当时价格 / 数量</th><th scope="col">结果 / 实际成交</th><th scope="col">依据 / 复盘操作</th></tr></thead>
+        <tbody id="execution-review-alerts"><tr><td colspan="5" class="empty">正在读取…</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+  <section class="panel execution-panel" id="t-close-review" aria-labelledby="t-close-review-title">
+    <h2 id="t-close-review-title">做 T 与原仓不动对比</h2>
+    <p>已配对部分按实际成交计算价差和费用。未接回部分用卖出净收入减去对应份额的收盘市值。</p>
+    <dl id="execution-t-summary" class="execution-t-metrics" hidden></dl>
+    <div class="scroll" tabindex="0" role="region" aria-label="做 T 与原仓不动逐轮对比表">
+      <table class="execution-table execution-t-table">
+        <thead><tr><th scope="col">证券 / 本轮状态</th><th scope="col">实际卖出</th><th scope="col">已接回 / 配对净额</th>
+          <th scope="col">未接回份额 / 收盘比较</th><th scope="col">本轮相对原仓不动</th></tr></thead>
+        <tbody id="execution-review-t"><tr><td colspan="5" class="empty">正在读取…</td></tr></tbody>
+      </table>
+    </div>
+    <ul id="execution-t-notes" class="execution-t-notes"></ul>
+  </section>
   <p id="status" class="status" role="status">正在读取收盘复盘…</p>
   <p id="source" class="source">—</p>
   <div id="review-results" hidden>

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime, time
+from datetime import date, datetime, time
 import fcntl
 from hashlib import sha256
 import json
@@ -121,6 +121,7 @@ def capture_rows(events, signals, quotes, plans, *, now, source, config_hash):
             'level': _number(event.get('level')), 'trigger': trigger, 'reason': event.get('reason'),
             'blockers': event.get('blockers') or [], 'source': source, 'config_hash': config_hash,
             'signal_date': plans.get(code, {}).get('signal_date'),
+            'entry_cap': _number(plans.get(code, {}).get('entry_price')) if trigger == 'v1_entry' else None,
             'native': bool(event.get('priority') == 'high' or side),
             'repeatable': bool(event.get('priority') == 'high' or side),
         }
@@ -191,7 +192,7 @@ def set_feedback(output, ident, action, *, day=None, now=None):
         return row['feedback']
 
 
-def persist_cycle(output, rows, *, now, notify=False, send=None, clock=None, trades=()):
+def persist_cycle(output, rows, *, now, notify=False, send=None, clock=None, trades=(), inactive_reason=None):
     """Persist current eligibility; repeat fresh unacknowledged actions at most 3 times.
 
     Each transmission is claimed under the file lock. Failed transmissions get
@@ -211,7 +212,9 @@ def persist_cycle(output, rows, *, now, notify=False, send=None, clock=None, tra
         changed = False
         for ident, saved in journal.items():
             if ident not in current_by_id and saved.get('active') is not False:
-                saved.update(active=False, inactive_at=now.isoformat(timespec='seconds'))
+                reason = inactive_reason(saved) if inactive_reason else None
+                saved.update(active=False, inactive_at=now.isoformat(timespec='seconds'),
+                             inactive_reason=reason or '后续轮询未再产生这条提醒')
                 changed = True
         for row in rows:
             ident = row['id']
@@ -225,6 +228,7 @@ def persist_cycle(output, rows, *, now, notify=False, send=None, clock=None, tra
                          latest_quote_at=row.get('quote_at'), latest_price=row.get('price'))
             if saved['active']:
                 saved['inactive_at'] = None
+                saved.pop('inactive_reason', None)
             changed = True
             if row['native'] and notify and send is not None:
                 candidates.append(ident)
@@ -404,3 +408,148 @@ def load_journal(output, trades=(), *, now=None):
             if len(result) >= 300:
                 return {'rows': result}
     return {'rows': result}
+
+
+REVIEW_LABELS = {
+    'filled': '已成交', 'partial': '部分成交', 'missed': '错过',
+    'skipped': '主动跳过', 'expired': '已失效', 'pending': '待确认',
+    'observe': '仅观察／受阻', 'needs_reconcile': '有关联线索，待对账',
+}
+
+
+def close_review_day(value, now):
+    if not isinstance(value, str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}', value):
+        raise ValueError('复盘日期须为 YYYY-MM-DD')
+    try:
+        day = date.fromisoformat(value)
+    except ValueError:
+        raise ValueError('复盘日期无效') from None
+    if day > now.date() or (day == now.date() and now.time() < time(15)):
+        raise ValueError('请在该交易日收盘后复盘')
+    return day.isoformat()
+
+
+def review_days(output):
+    days = []
+    for path in journal_dir(output).glob('????-??-??.json'):
+        try:
+            day = date.fromisoformat(path.stem)
+        except ValueError:
+            continue
+        days.append(day.isoformat())
+    return sorted(days, reverse=True)
+
+
+def _review_fills(row, trades, now):
+    relevant = []
+    for fill in trades:
+        if not isinstance(fill, dict):
+            continue
+        executed = parse_provider_time(fill.get('executed_at'))
+        if executed and executed <= now:
+            relevant.append(fill)
+    linked = _linked_fills(row, relevant)
+    unlinked = [fill for fill in relevant if not fill.get('alert_id')
+                and _matches_fill(row, {**fill, 'alert_id': row['id']})]
+    return linked, unlinked
+
+
+def _review_status(row, filled, unlinked):
+    quantity = row.get('quantity')
+    manual = row.get('manual_review') or {}
+    feedback = row.get('feedback') or {}
+    user_action = manual.get('outcome')
+    user_reason = manual.get('reason')
+    if filled:
+        if quantity and filled < quantity:
+            remaining = f'还有 {quantity - filled} 股/份未关联成交。'
+            if user_action in ('missed', 'skipped') and user_reason:
+                remaining += f'余量{REVIEW_LABELS[user_action]}：{user_reason}'
+            elif feedback.get('action') == 'deferred':
+                remaining += '已记录暂不执行反馈。'
+            return 'partial', remaining
+        reason = '有同日、同向的实际成交记录与提醒明确关联。'
+        if not quantity:
+            reason += '原提醒未记录计划数量。'
+        return 'filled', reason
+    if row.get('category') == 'diagnostic' or not row.get('side'):
+        blockers = '；'.join(filter(None, row.get('blockers') or []))
+        return 'observe', blockers or '结构、账户风险或观察提醒，无可关联的买卖指令。'
+    if unlinked:
+        return 'needs_reconcile', '提醒之后有同证券、同方向成交尚未关联，需确认是否由这条提醒触发。'
+    if user_action in ('missed', 'skipped') and user_reason:
+        return user_action, f'本人复盘确认：{user_reason}'
+    if feedback.get('action') == 'deferred':
+        return 'skipped', '盘中已选择「暂不执行」，具体原因待补。'
+    if row.get('inactive_at'):
+        return 'expired', row.get('inactive_reason') or '盘中已撤销此提醒，旧记录未留存具体原因。'
+    if feedback.get('action') == 'seen':
+        return 'pending', '已看到提醒，收盘仍无关联成交。请核对是否错过、跳过或实际成交未登记。'
+    last_seen = parse_provider_time(row.get('last_seen_at'))
+    if last_seen and last_seen.astimezone(CN).time() >= time(14, 59):
+        return 'expired', '最后一轮提醒仍有效，随收盘到期。未见关联成交，实际处理情况未确认。'
+    return 'pending', '已到收盘，未见关联成交，也缺少临近收盘的提醒状态。实际处理情况待确认。'
+
+
+def _notification_label(row):
+    result = row.get('notification') or {}
+    if not row.get('native'):
+        return '无桌面通知'
+    if result.get('outcome') == 'failed':
+        return '桌面通知提交失败'
+    if result.get('outcome') in ('sending', 'unknown'):
+        return '桌面通知送达待确认'
+    if result.get('submitted'):
+        return '桌面通知已提交'
+    return '桌面通知未提交'
+
+
+def load_close_review(output, day, trades=(), *, now=None):
+    now = _clock(now)
+    day = close_review_day(day, now)
+    summary = dict.fromkeys(REVIEW_LABELS, 0)
+    result = []
+    for row in sorted(_day_rows(journal_dir(output), day).values(), key=lambda item: item['at']):
+        linked, unlinked = _review_fills(row, trades, now)
+        filled = sum(fill['quantity'] for fill in linked)
+        status, reason = _review_status(row, filled, unlinked)
+        summary[status] += 1
+        can_link = bool(row.get('side')) and status not in ('filled', 'observe')
+        result.append({**{key: row.get(key) for key in ('id', 'day', 'code', 'name', 'kind',
+                            'at', 'price', 'level', 'quantity', 'side', 'inactive_at', 'manual_review')},
+                       'filled_quantity': filled, 'review_status': status, 'review_label': REVIEW_LABELS[status],
+                       'review_reason': reason, 'trigger_reason': row.get('reason'),
+                       'notification_label': _notification_label(row),
+                       'can_link': can_link, 'can_review': can_link and status != 'needs_reconcile',
+                       'fills': [{key: fill.get(key) for key in ('quantity', 'price', 'fee', 'executed_at')}
+                                 for fill in sorted(linked, key=lambda item: parse_provider_time(item['executed_at']))]})
+    return {'summary': {**summary, 'total': len(result)}, 'rows': result}
+
+
+def record_close_review(output, ident, day, outcome, reason, trades=(), *, now=None):
+    now = _clock(now)
+    day = close_review_day(day, now)
+    if not isinstance(ident, str) or not ID.fullmatch(ident):
+        raise ValueError('提醒编号无效')
+    if outcome not in ('missed', 'skipped', 'clear'):
+        raise ValueError('请选择错过、主动跳过或清除复盘标记')
+    if outcome != 'clear' and (not isinstance(reason, str) or not 1 <= len(reason.strip()) <= 200):
+        raise ValueError('请填写 1 至 200 字的具体原因')
+    folder = journal_dir(output)
+    with _locked(folder):
+        journal = _day_rows(folder, day)
+        row = journal.get(ident)
+        if not row or not row.get('side') or row.get('category') == 'diagnostic':
+            raise ValueError('找不到可以复盘标记的交易提醒')
+        if outcome == 'clear':
+            if row.pop('manual_review', None) is not None:
+                write(folder / (day + '.json'), journal)
+            return None
+        linked, unlinked = _review_fills(row, trades, now)
+        filled = sum(fill['quantity'] for fill in linked)
+        current, _ = _review_status(row, filled, unlinked)
+        if current in ('filled', 'needs_reconcile'):
+            raise ValueError('已成交或有同向成交待对账，先核对实际记录')
+        row['manual_review'] = {'outcome': outcome, 'reason': reason.strip(), 'at': now.isoformat(timespec='seconds')}
+        write(folder / (day + '.json'), journal)
+        return row['manual_review']

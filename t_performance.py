@@ -6,7 +6,7 @@ portfolio's investment profit or evidence of a profitable strategy.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from collections import Counter
 import re
@@ -104,6 +104,80 @@ def _sum(rows, key):
     return money(sum(values, Decimal(0))) if values else None
 
 
+def _clock(now):
+    now = now or datetime.now(CN)
+    return now.replace(tzinfo=CN) if now.tzinfo is None else now.astimezone(CN)
+
+
+def _broker_references(raw):
+    """A linked broker fill may belong to only one leg of a cycle."""
+    fills = raw.get('fills') or []
+    references = [raw.get('sell_fill_id')]
+    if isinstance(fills, list):
+        references.extend(fill.get('broker_fill_id') for fill in fills if isinstance(fill, dict))
+    return [ident for ident in references if isinstance(ident, str) and ident]
+
+
+def _validated_cycles(book, now, since, *, only=None):
+    invalid = outside = 0
+    cycles = book.get('cycles', []) if isinstance(book, dict) else []
+    if not isinstance(cycles, list):
+        return [], 1, 0
+    # Exclude both copies rather than guessing which record is correct.
+    ids = [row['id'] for row in cycles if isinstance(row, dict) and isinstance(row.get('id'), str)]
+    duplicates = {ident for ident, count in Counter(ids).items() if count > 1}
+    duplicate_fills = set()
+    if only is not None:
+        references = [ident for row in cycles if isinstance(row, dict) and row.get('date') == only.isoformat()
+                      for ident in _broker_references(row)]
+        duplicate_fills = {ident for ident, count in Counter(references).items() if count > 1}
+    valid = []
+    for raw in cycles:
+        try:
+            if not isinstance(raw, dict):
+                raise ValueError('invalid cycle')
+            day = date.fromisoformat(raw['date'])
+            if only is not None and day != only:
+                continue
+            if day > now.date():
+                raise ValueError('future cycle')
+            if day < since:
+                outside += 1
+                continue
+            if raw.get('id') in duplicates or duplicate_fills.intersection(_broker_references(raw)):
+                raise ValueError('duplicate cycle or fill identity')
+            valid.append(_cycle(raw, now, day))
+        except (KeyError, TypeError, ValueError, OverflowError):
+            invalid += 1
+    return valid, invalid, outside
+
+
+def _review_row(cycle, mark):
+    costs = summarize_cycle_costs(cycle)
+    remaining = cycle['quantity'] - cycle['buyback_quantity']
+    row = {
+        'id': cycle['id'], 'code': cycle['code'], 'name': cycle.get('name', cycle['code']),
+        'date': cycle['date'], 'status': cycle['status'], 'quantity': cycle['quantity'],
+        'paired_quantity': cycle['buyback_quantity'], 'unmatched_quantity': remaining,
+        'sell_price': cycle['sell_price'], **costs,
+        'comparison_status': 'fully_paired' if not remaining else 'quote_missing_or_stale',
+        'unmatched_price': None, 'unmatched_quote_at': None,
+        'unmatched_gross_comparison': None, 'unmatched_comparison': None,
+        'comparison_note': '未接回余量相对继续持有的市值差额；不是已完成做T盈利，不含假设接回费用。',
+    }
+    if remaining and mark:
+        current, stamp = mark
+        gross = money((decimal(cycle['sell_price']) - decimal(current)) * remaining)
+        row.update(unmatched_price=current, unmatched_quote_at=stamp, unmatched_gross_comparison=gross)
+        fee = costs['unmatched_sell_fee_actual']
+        if fee is None:
+            row['comparison_status'] = 'sell_fee_unknown'
+        else:
+            row['unmatched_comparison'] = money(decimal(gross) - decimal(fee))
+            row['comparison_status'] = 'marked_comparison'
+    return row
+
+
 def build_review(book, quotes=None, now=None):
     """Return a seven-calendar-day report attributed to each T sale's date.
 
@@ -111,60 +185,11 @@ def build_review(book, quotes=None, now=None):
     same-day provider timestamps can mark shares which have not been bought back.
     Missing marks/fees remain unknown and never enter realized paired profit.
     """
-    now = now or datetime.now(CN)
-    now = now.replace(tzinfo=CN) if now.tzinfo is None else now.astimezone(CN)
+    now = _clock(now)
     since = now.date() - timedelta(days=6)
-    rows = []
-    invalid = 0
-    outside = 0
-    cycles = book.get('cycles', []) if isinstance(book, dict) else []
-    if not isinstance(cycles, list):
-        cycles = []
-        invalid += 1
-    # Duplicate identities are all excluded; choosing either could conceal a
-    # conflicting fill history and inflate the reported sample count.
-    ids = [r.get('id') for r in cycles if isinstance(r, dict) and isinstance(r.get('id'), str)]
-    duplicates = {ident for ident, count in Counter(ids).items() if count > 1}
-    for raw in cycles:
-        try:
-            if not isinstance(raw, dict):
-                raise ValueError('invalid cycle')
-            day = date.fromisoformat(raw['date'])
-            if day > now.date():
-                raise ValueError('future cycle')
-            if day < since:
-                outside += 1
-                continue
-            if raw.get('id') in duplicates:
-                raise ValueError('duplicate cycle identity')
-            cycle = _cycle(raw, now, day)
-        except (KeyError, TypeError, ValueError, OverflowError):
-            invalid += 1
-            continue
-        costs = summarize_cycle_costs(cycle)
-        remaining = cycle['quantity'] - cycle['buyback_quantity']
-        row = {
-            'id': cycle['id'], 'code': cycle['code'], 'name': cycle.get('name', cycle['code']),
-            'date': day.isoformat(), 'status': cycle['status'], 'quantity': cycle['quantity'],
-            'paired_quantity': cycle['buyback_quantity'], 'unmatched_quantity': remaining,
-            'sell_price': cycle['sell_price'], **costs,
-            'comparison_status': 'fully_paired' if not remaining else 'quote_missing_or_stale',
-            'unmatched_price': None, 'unmatched_quote_at': None,
-            'unmatched_gross_comparison': None, 'unmatched_comparison': None,
-            'comparison_note': '未接回余量相对继续持有的市值差额；不是已完成做T盈利，不含假设接回费用。',
-        }
-        mark = _mark((quotes or {}).get(cycle['code']), now) if remaining and isinstance(quotes, (dict, type(None))) else None
-        if mark:
-            current, stamp = mark
-            gross = money((decimal(cycle['sell_price']) - decimal(current)) * remaining)
-            row.update(unmatched_price=current, unmatched_quote_at=stamp, unmatched_gross_comparison=gross)
-            fee = costs['unmatched_sell_fee_actual']
-            if fee is None:
-                row['comparison_status'] = 'sell_fee_unknown'
-            else:
-                row['unmatched_comparison'] = money(decimal(gross) - decimal(fee))
-                row['comparison_status'] = 'marked_comparison'
-        rows.append(row)
+    quotes = quotes if isinstance(quotes, dict) else {}
+    cycles, invalid, outside = _validated_cycles(book, now, since)
+    rows = [_review_row(cycle, _mark(quotes.get(cycle['code']), now)) for cycle in cycles]
     rows.sort(key=lambda row: (row['date'], row['id']), reverse=True)
     complete = [row for row in rows if row['status'] == 'closed' and row['unmatched_quantity'] == 0
                 and row['paired_net_actual'] is not None]
@@ -204,3 +229,68 @@ def build_review(book, quotes=None, now=None):
             '没有完整资金曲线，不能据此计算账户最大回撤或年化收益；模拟、样本外验证仍不可省略。',
         ],
     }
+
+
+
+def _close_mark(quote, now, day):
+    if not isinstance(quote, dict):
+        return None
+    stamp = parse_provider_time(quote.get('source_timestamp'))
+    price = nonnegative(quote.get('price'))
+    if not stamp or stamp > now or not price:
+        return None
+    stamp = stamp.astimezone(CN)
+    if stamp.date() != day or stamp.time() < time(15):
+        return None
+    return price, stamp.isoformat(timespec='seconds')
+
+
+def build_close_review(book, day, quotes=None, now=None):
+    """Compare each T cycle with leaving the original position untouched as of that day's close."""
+    now = _clock(now)
+    review_day = date.fromisoformat(day)
+    if review_day > now.date():
+        raise ValueError('复盘日期不能晚于今天')
+    closed = review_day < now.date() or now.time() >= time(15)
+    quotes = quotes if isinstance(quotes, dict) else {}
+    cycles, invalid, _ = _validated_cycles(book, now, review_day, only=review_day) if closed else ([], 0, 0)
+    rows = []
+    for cycle in sorted(cycles, key=lambda item: item.get('sold_at') or item.get('recorded_at') or item['id']):
+        row = _review_row(cycle, _close_mark(quotes.get(cycle['code']), now, review_day))
+        paired = row['paired_quantity']
+        net = row['paired_net_actual'] if paired else 0
+        mark_delta = row['unmatched_comparison'] if row['unmatched_quantity'] else 0
+        complete = net is not None and mark_delta is not None
+        row.update(
+            paired_buy_price=float(decimal(cycle['buyback_cost']) / paired) if paired else None,
+            net_status='complete' if complete else 'incomplete',
+            net_vs_hold=money(decimal(net) + decimal(mark_delta)) if complete else None,
+        )
+        rows.append(row)
+    if not closed:
+        status = 'waiting_close'
+    elif invalid or any(row['net_status'] != 'complete' for row in rows):
+        status = 'incomplete'
+    else:
+        status = 'complete' if rows else 'no_samples'
+    summary = {
+        'cycle_count': len(rows),
+        'paired_net_actual': _sum(rows, 'paired_net_actual'),
+        'paired_net_estimated': _sum(rows, 'paired_net_estimate'),
+        'unmatched_quantity': sum(row['unmatched_quantity'] for row in rows),
+        'unmatched_comparison': _sum(rows, 'unmatched_comparison'),
+        'net_vs_hold': _sum(rows, 'net_vs_hold') if status == 'complete' else None,
+        'net_status': status,
+        'paired_actual_count': sum(row['paired_net_actual'] is not None for row in rows),
+        'unmatched_marked_count': sum(row['unmatched_comparison'] is not None for row in rows),
+        'unmatched_unpriced_count': sum(row['unmatched_quantity'] > 0 and row['unmatched_comparison'] is None for row in rows),
+        'excluded_invalid_cycles': invalid,
+    }
+    notes = [
+        '已接回份额按实际成交价差扣除分摊卖出费用和接回费用。费用待补的估算独立显示。',
+        '未接回份额按卖出净款减去原仓持有到当日收盘的市值，单独标为收盘估值差额。',
+        '相对原仓不动的净差额，正数为多赚或少亏，负数为少赚或多亏。合计需每一轮都有完整费用和所需收盘价。',
+    ]
+    if invalid:
+        notes.append(f'有 {invalid} 轮记录无法核验或重复，已排除且暂停计算当天合计。')
+    return {'day': review_day.isoformat(), 'summary': summary, 'rows': rows, 'notes': notes}
