@@ -118,6 +118,8 @@ def create_app(folder:Path=ROOT):
     def load_config_values(cfg):
         if cfg.get('baseline_equity',0)<=0 or cfg.get('max_additional_loss',0)<=0 or cfg.get('cash',-1)<0:
             raise ValueError('账户基准、市值预算必须为正，现金不能为负')
+        from risk_engine import cash_balances
+        cash_balances(cfg)
         for p in cfg.get('positions',[]):
             if p['type'] not in ('stock','etf','convertible') or p['quantity']<0 or p['baseline_price']<=0:
                 raise ValueError('持仓台账异常')
@@ -239,6 +241,7 @@ def create_app(folder:Path=ROOT):
         receipt = cfg.get('trade_reconciliation', {})
         snapshot = latest_broker_snapshot(output, cfg) or {}
         return jsonify(cash=cfg['cash'], positions=cfg.get('positions', []),
+                       frozen_cash=cfg.get('frozen_cash', 0), withdrawable_cash=receipt.get('withdrawable_cash'),
                        last_checked=receipt.get('broker_asof'), last_snapshot=snapshot.get('asof'),
                        period_pnl=receipt.get('period_pnl'),
                        trades=list(reversed(cfg.get('reconciled_trades', [])[-100:])),
@@ -282,6 +285,33 @@ def create_app(folder:Path=ROOT):
             save_config(updated)
         return jsonify(ok=True, message='成交、持仓和现金已同步。盘中额度仍需完整实时行情核验。',
                        count=len(preview['events']), cash=updated['cash'])
+
+    def balance_preview(cfg, data):
+        from account_balance import prepare
+        return prepare(cfg, data, previous_snapshot=latest_broker_snapshot(output, cfg))
+
+    @app.route('/api/account-balance/preview', methods=['POST'])
+    def preview_account_balance():
+        data = request.get_json(silent=True)
+        with WRITE_LOCK:
+            cfg = config()
+            _, preview = balance_preview(cfg, data)
+            token = trade_signature(cfg, ['balance_only', data]) if not preview['differences'] else None
+        return jsonify(**preview, token=token)
+
+    @app.route('/api/account-balance/confirm', methods=['POST'])
+    def confirm_account_balance():
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict) or not isinstance(body.get('token'), str):
+            raise ValueError('请先预览无新增流水的账户余额')
+        with WRITE_LOCK:
+            cfg = config()
+            data = body.get('data')
+            updated, preview = balance_preview(cfg, data)
+            if preview['differences'] or not hmac.compare_digest(body['token'], trade_signature(cfg, ['balance_only', data])):
+                return jsonify(error='账户或核对数据发生变化，请重新预览。'), 409
+            save_config(updated)
+        return jsonify(ok=True, message='账户余额及今日可卖记录已核对；未新增成交或资金流水，风控仍须实时行情核验。')
 
     @app.route('/alert-journal')
     def alert_journal_page():
@@ -595,7 +625,7 @@ def create_app(folder:Path=ROOT):
             state=strategy.read(output/'intraday_status.json')
             if state.get('quote_health',{}).get('block_trade_signals'):
                 raise ValueError('行情源时间未核验，暂不能核对 V1 账户')
-            equity=float(cfg['cash'])+sum(prices[str(p['code'])]*int(p['quantity']) for p in cfg['positions'] if int(p['quantity'])>0)
+            equity=float(cfg['cash'])+float(cfg.get('frozen_cash',0))+sum(prices[str(p['code'])]*int(p['quantity']) for p in cfg['positions'] if int(p['quantity'])>0)
             account=strategy.observe(output,cfg,equity,verified=True,reconcile=True)
         return jsonify(ok=True,account=account,message='已按当前台账和已核验报价核对，高水位与历史回撤保留。')
 
@@ -695,12 +725,14 @@ def create_app(folder:Path=ROOT):
             cfg=config()
             state=intraday_state().get_json()
             book=t_runtime.ledger(output,cfg)
-            payload=build_actions(cfg,state,book)
+            book['fee_samples']=t_runtime.fee_samples(cfg,book)
+            payload=build_actions(cfg,state,book,output=output)
             journal=load_journal(output,cfg.get('reconciled_trades',[]))
         live_by_id = {signal['id']: signal for signal in payload['signals']}
         cards_by_id = {card['alert_id']: card for card in payload['cards'] if card['alert_id']}
         relevant = {ident for ident, signal in live_by_id.items()
-                    if signal['code'] == 'PORT' or held_observation(signal)} | cards_by_id.keys()
+                    if signal['code'] == 'PORT' or held_observation(signal) or signal.get('ledger_notice')
+                    or signal.get('validation_status') == 'pending' and signal.get('held') is True} | cards_by_id.keys()
         archived = {row['id']: row for row in journal['rows'] if row['id'] in relevant}
         payload['alerts'] = []
         for ident, row in archived.items():
@@ -716,6 +748,10 @@ def create_app(folder:Path=ROOT):
                        blockers=current.get('blockers') or [],
                        quantity=card.get('quantity') if card else None,
                        expires_at=(payload.get('signal_expires_at') or {}).get(ident) or (card or payload)['expires_at'])
+            for key in ('ledger_notice', 'cycle_id', 'closeout', 'validation_status', 'validation_reason',
+                        'followup', 'remaining_target', 'original_target', 'filled_before'):
+                if key in current:
+                    row[key] = current[key]
             if not card:
                 row['side'] = None
             if card and card['quantity'] is None:
@@ -733,6 +769,8 @@ def create_app(folder:Path=ROOT):
         if any(message.startswith('提醒记录保存失败') for message in errors if isinstance(message, str)):
             payload['desktop_status'] = '提醒记录保存失败，请检查后台运行状态'
         payload['validation_note']='软件运行测试不等于策略盈利验证；实际成交、样本外回测与费用证据不足时，策略保持待验证。'
+        from reminder_policy import summary
+        payload['validation_policy'] = summary(output, cfg)
         return jsonify(payload)
 
     desktop_test_at = None
@@ -947,6 +985,8 @@ def create_app(folder:Path=ROOT):
         """Build a read-only after-close plan from one complete quote batch."""
         with WRITE_LOCK:
             cfg = config()
+            fee_book = t_runtime.ledger(output, cfg)
+            fee_samples = t_runtime.fee_samples(cfg, fee_book)
         snapshot = latest_broker_snapshot(output, cfg)
         confirmed = reconcile.close_snapshot(cfg)
         if confirmed and (not snapshot or parse_provider_time(confirmed['asof']) >= parse_provider_time(snapshot['asof'])):
@@ -980,7 +1020,8 @@ def create_app(folder:Path=ROOT):
         asof = min(known_stamps).isoformat() if known_stamps else None
         return jsonify(build_close_review(cfg, snapshot, quotes, candidates,
                                           asof=asof, data_verified=data_verified,
-                                          quote_errors=errors))
+                                          quote_errors=errors, fee_model=fee_book.get('fee_model'),
+                                          fee_samples=fee_samples))
 
     @app.route('/api/daily-excludes',methods=['POST','DELETE'])
     def daily_exclude():

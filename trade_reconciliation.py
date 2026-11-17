@@ -61,6 +61,7 @@ def position_signature(rows):
 
 def matches_receipt(cfg, receipt):
     return (receipt and cfg['cash'] == receipt.get('available_cash')
+            and cfg.get('frozen_cash', 0) == receipt.get('frozen_cash', 0)
             and position_signature(cfg.get('positions', [])) == receipt.get('position_signature'))
 
 
@@ -217,16 +218,17 @@ def prepare(cfg, body, *, now=None, previous_snapshot=None, legacy_flows=(), res
     if asof.isoformat() < new_events[-1]['executed_at']:
         raise ValueError('券商账户时间须覆盖本批最后一条流水')
     available = cents(decimal(balances.get('available_cash'), '券商可用资金'))
+    frozen = cents(decimal(balances.get('frozen_cash', 0), '券商冻结资金'))
     withdrawable = balances.get('withdrawable_cash')
     withdrawable = cents(decimal(withdrawable, '券商可取资金')) if withdrawable not in (None, '') else None
     if withdrawable is not None and withdrawable > available:
         raise ValueError('券商可取资金不能超过可用资金')
     total_assets = balances.get('total_assets')
     total_assets = cents(decimal(total_assets, '券商总资产', '.01')) if total_assets not in (None, '') else None
-    if total_assets is not None and total_assets < available:
-        raise ValueError('券商总资产不能低于可用资金')
+    if total_assets is not None and total_assets < available + frozen:
+        raise ValueError('券商总资产不能低于可用资金与冻结资金之和')
     positions = {str(row['code']): row for row in new_cfg.get('positions', [])}
-    cash = cents(decimal(cfg['cash'], '台账可用资金'))
+    cash = cents(decimal(cfg['cash'], '台账可用资金')) + cents(decimal(cfg.get('frozen_cash', 0), '台账冻结资金'))
     touched = set()
     for event in new_events:
         if 'amount' in event:
@@ -245,8 +247,8 @@ def prepare(cfg, body, *, now=None, previous_snapshot=None, legacy_flows=(), res
             touched.add(event['code'])
             trades.append(event)
     differences = result['differences']
-    if cash != available:
-        differences.append(f'计算可用资金 ¥{cash:,.2f}，券商显示 ¥{available:,.2f}')
+    if cash != available + frozen:
+        differences.append(f'计算总现金 ¥{cash:,.2f}，券商可用＋冻结 ¥{available + frozen:,.2f}')
     declared = balances.get('positions', {})
     if not isinstance(declared, dict):
         raise ValueError('券商持仓核对格式无效')
@@ -271,13 +273,15 @@ def prepare(cfg, body, *, now=None, previous_snapshot=None, legacy_flows=(), res
         result['positions'].append({'code': code, 'quantity': qty, 'broker_quantity': broker_qty,
                                     'available_quantity': sellable})
     new_cfg['cash'] = float(available)
+    new_cfg['frozen_cash'] = float(frozen)
     new_cfg['positions'] = [item for code, item in positions.items() if item['quantity'] > 0 or code not in touched]
     active = [item for item in new_cfg['positions'] if item['quantity'] > 0]
-    if total_assets is not None and active and total_assets == available:
-        differences.append('券商总资产等于可用资金，但本批计算后仍有持仓')
+    if total_assets is not None and active and total_assets == available + frozen:
+        differences.append('券商总资产等于全部现金，但本批计算后仍有持仓')
     flow = sum((Decimal(str(event['amount'])) for event in new_events if 'amount' in event), Decimal('0'))
     receipt = {
-        'broker_asof': asof.isoformat(), 'available_cash': float(available),
+        'broker_asof': asof.isoformat(), 'available_cash': float(available), 'frozen_cash': float(frozen),
+        'total_cash': float(available + frozen),
         'withdrawable_cash': float(withdrawable) if withdrawable is not None else None,
         'positions': checked, 'position_signature': position_signature(new_cfg['positions']),
         'total_assets': float(total_assets) if total_assets is not None else None,
@@ -292,7 +296,9 @@ def prepare(cfg, body, *, now=None, previous_snapshot=None, legacy_flows=(), res
         receipt['period_pnl'] = {'from': anchor[0].isoformat(), 'net_external_flow': float(flow),
                                  'amount': float(total_assets - beginning - flow)}
     new_cfg['trade_reconciliation'] = receipt
-    result.update(cash_after=float(cash), broker_cash=float(available), receipt=receipt)
+    result.update(cash_after=float(cash - frozen), broker_cash=float(available),
+                  frozen_before=cfg.get('frozen_cash', 0), frozen_after=float(frozen),
+                  total_cash_after=float(cash), receipt=receipt)
     return new_cfg, result
 
 
@@ -307,6 +313,7 @@ def close_snapshot(cfg):
     if any(str(row['code']) not in checked for row in rows):
         return None
     return {'asof': receipt['broker_asof'], 'available_cash': receipt['available_cash'],
-            'withdrawable_cash': receipt['withdrawable_cash'], 'source': '已确认成交对账',
+            'withdrawable_cash': receipt['withdrawable_cash'], 'frozen_cash': receipt.get('frozen_cash', 0),
+            'total_assets': receipt.get('total_assets'), 'source': receipt.get('source') or '已确认成交对账',
             'positions': [dict(row, available_quantity=checked[str(row['code'])]['available_quantity'])
                           for row in rows]}

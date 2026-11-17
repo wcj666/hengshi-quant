@@ -5,7 +5,7 @@ from tempfile import TemporaryDirectory
 from unittest import TestCase, main
 from zoneinfo import ZoneInfo
 
-from alert_journal import capture_rows, load_journal, persist_cycle, validate_fill_link, set_feedback
+from alert_journal import capture_rows, load_journal, persist_cycle, validate_fill_link, set_feedback, followup_signals
 
 
 CN = ZoneInfo('Asia/Shanghai')
@@ -247,6 +247,114 @@ class AlertJournalTests(TestCase):
         persist_cycle(self.output, self.rows(close), now=close, notify=True,
                       send=lambda _: self.fail('notification after close'))
         self.assertEqual(self.read(now=close)['status'], 'expired')
+
+
+class RemainingSellFollowupTests(TestCase):
+    def setUp(self):
+        folder = TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.output = Path(folder.name)
+        self.signal = dict(id=ALERT_ID, code=CODE, name='测试ETF', title='退出复核', category='reduce',
+                           trigger='stop', held=True, shares=500, price=1., level=1.,
+                           priority='high', blockers=[], reason='固定退出条件仍触发')
+        self.positions = [dict(code=CODE, quantity=900)]
+        self.now = AT + timedelta(seconds=10)
+        self.inventory = {CODE: dict(date=str(AT.date()), base_quantity=900, available_quantity=900,
+                                    confirmed_at=self.now.isoformat())}
+        self.trades = [self.fill('one', ALERT_ID, 100, AT + timedelta(seconds=5))]
+        persist_cycle(self.output, self.capture(self.signal, AT), now=AT)
+
+    def fill(self, ident, alert_id, quantity, at):
+        return dict(fill_id=ident, alert_id=alert_id, code=CODE, side='sell', quantity=quantity,
+                    executed_at=at.isoformat(), price=1.)
+
+    def capture(self, signal, now):
+        return capture_rows([], [signal], {CODE: {'source_timestamp': now.isoformat()}}, {},
+                            now=now, source='synthetic', config_hash='fixture')
+
+    def follow(self, signals=None):
+        return followup_signals(self.output, signals or [self.signal], self.positions,
+                                self.inventory, self.trades, now=self.now)
+
+    def test_partial_fills_form_stable_residual_chain_until_target_complete(self):
+        first = self.follow()[0]
+        self.assertEqual(first['shares'], 400)
+        self.assertEqual(first['remaining_target'], 400)
+        self.assertEqual(first['filled_before'], 100)
+        self.assertNotEqual(first['id'], ALERT_ID)
+        self.assertEqual(self.follow()[0]['id'], first['id'])
+        self.assertEqual(self.follow([first])[0], first)
+        persist_cycle(self.output, self.capture(first, self.now), now=self.now)
+        self.trades.append(self.fill('two', first['id'], 200, AT + timedelta(seconds=15)))
+        self.now = AT + timedelta(seconds=20)
+        self.positions[0]['quantity'] = 700
+        self.inventory[CODE].update(base_quantity=700, available_quantity=700,
+                                    confirmed_at=self.now.isoformat())
+        second = self.follow()[0]
+        self.assertEqual(second['shares'], 200)
+        self.assertEqual(second['root_alert_id'], ALERT_ID)
+        self.assertEqual(second['parent_alert_id'], first['id'])
+        self.assertNotEqual(second['id'], first['id'])
+        persist_cycle(self.output, self.capture(second, self.now), now=self.now)
+        self.trades.append(self.fill('three', second['id'], 200, AT + timedelta(seconds=21)))
+        self.now += timedelta(seconds=5)
+        self.assertEqual(self.follow(), [])
+        original = json.loads((self.output/'alert_journal'/f'{AT.date()}.json').read_text())[ALERT_ID]
+        self.assertEqual(original['quantity'], 500)
+        self.assertEqual(original['at'], AT.isoformat())
+
+    def test_missing_or_old_inventory_is_observation_then_confirmation_promotes_once(self):
+        for changes in ({'date': '2024-06-14'}, {'base_quantity': 1000},
+                        {'confirmed_at': AT.isoformat()}, {'confirmed_at': (self.now+timedelta(seconds=1)).isoformat()}):
+            original = self.inventory[CODE].copy()
+            with self.subTest(changes=changes):
+                self.inventory[CODE].update(changes)
+                pending = self.follow()[0]
+                self.assertIsNone(pending['shares'])
+                self.assertEqual(pending['remaining_target'], 400)
+                row = self.capture(pending, self.now)[0]
+                self.assertTrue(row['native'])
+                self.assertFalse(row['repeatable'])
+                self.assertIsNone(row['side'])
+            self.inventory[CODE] = original
+        pending = self.follow()[0]
+        self.inventory[CODE]['available_quantity'] = 0
+        blocked = self.follow()[0]
+        self.assertIsNone(blocked['shares'])
+        self.assertNotEqual(pending['id'], blocked['id'])
+        self.inventory[CODE]['available_quantity'] = 300
+        self.assertEqual(self.follow()[0]['shares'], 300)
+
+    def test_duplicates_wrong_direction_dates_and_future_fills_do_not_change_target(self):
+        self.trades += [self.trades[0].copy(),
+                        dict(self.trades[0], fill_id='wrong-side', side='buy'),
+                        dict(self.trades[0], fill_id='wrong-code', code='600001'),
+                        dict(self.trades[0], fill_id='old', executed_at=(AT-timedelta(days=1)).isoformat()),
+                        dict(self.trades[0], fill_id='future', executed_at=(self.now+timedelta(seconds=1)).isoformat()),
+                        dict(self.trades[0], fill_id='bad', quantity=True)]
+        self.assertEqual(self.follow()[0]['remaining_target'], 400)
+
+    def test_parent_feedback_does_not_silence_new_remaining_task_but_child_feedback_does(self):
+        set_feedback(self.output, ALERT_ID, 'seen', now=AT)
+        child = self.follow()[0]
+        sent = persist_cycle(self.output, self.capture(child, self.now), now=self.now,
+                             notify=True, send=lambda _: True, trades=self.trades)
+        self.assertEqual(sent['submitted'], 1)
+        set_feedback(self.output, child['id'], 'deferred', now=self.now)
+        self.now += timedelta(seconds=60)
+        sent = persist_cycle(self.output, self.capture(self.follow()[0], self.now), now=self.now,
+                             notify=True, send=lambda _: self.fail('child feedback ignored'), trades=self.trades)
+        self.assertEqual(sent['attempted'], 0)
+
+    def test_child_fill_cannot_exceed_total_original_goal(self):
+        child = self.follow()[0]
+        persist_cycle(self.output, self.capture(child, self.now), now=self.now)
+        valid = self.fill('two', child['id'], 400, self.now+timedelta(seconds=1))
+        self.assertEqual(validate_fill_link(self.output, valid, self.trades), 1.)
+        # Another fill linked to the root is also part of the same total goal.
+        self.trades.append(self.fill('other', ALERT_ID, 200, self.now))
+        with self.assertRaisesRegex(ValueError, '原减仓目标'):
+            validate_fill_link(self.output, valid, self.trades)
 
 
 if __name__ == '__main__':

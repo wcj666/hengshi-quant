@@ -97,6 +97,32 @@ class CloseReviewTests(unittest.TestCase):
         self.assertEqual(policy["broker_withdrawable_cash"], 3000)
         self.assertEqual(policy["cash_after_planned_sales"], 10000 + policy["estimated_proceeds_sellable"])
 
+    def test_close_review_shares_the_preview_fee_model_and_preserves_reserve(self):
+        from reduction_preview import preview_calculation
+        from strategy_v1 import strategy_prefs
+        self.snapshot['positions'] = [self.snapshot['positions'][0]]
+        self.set_stop('600001', 19)
+        model = {'stock': {'commission_per_10k': 5, 'minimum_commission': 5}}
+        result = build_close_review(self.config, self.snapshot, self.quotes,
+                                    data_verified=True, fee_model=model)
+        policy = result['cash_policy']
+        sale = result['sell_plan'][0]
+        rows = [dict(code='600001', name='测试股', quantity=500, price=18,
+                     kind='stock', lot=100, eligibility='可卖数量已核对', available_quantity=500,
+                     sector=None)]
+        preview = preview_calculation(rows, {'600001': 500}, 10000,
+                    strategy_prefs(self.config), {'fee_model': model}, None, 'live')
+        self.assertEqual(sale['estimated_fee'], 9.59)
+        self.assertEqual(sale['safety_reserve'], 10.41)
+        self.assertEqual(policy['estimated_fees'], preview['estimated_fees'])
+        self.assertEqual(policy['safety_reserve'], preview['safety_reserve'])
+        self.assertEqual(policy['cash_after_planned_sales'], preview['cash_after'])
+        self.assertEqual(policy['cash_after_sales_estimate'], preview['estimated_cash_after'])
+        unknown = build_close_review(self.config, self.snapshot, self.quotes, data_verified=True)['cash_policy']
+        self.assertIsNone(unknown['estimated_fees'])
+        self.assertIsNone(unknown['cash_after_sales_estimate'])
+        self.assertEqual(unknown['cash_after_planned_sales'], policy['cash_after_planned_sales'])
+
     def test_fixed_stop_overrides_relative_price_strength_and_stale_data_blocks_it(self):
         self.set_stop("600004", 31)
         result = build_close_review(self.config, self.snapshot, self.quotes, data_verified=True)

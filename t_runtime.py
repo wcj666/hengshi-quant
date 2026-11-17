@@ -50,6 +50,23 @@ def ledger(output,cfg,now=None):
             data['availability'][code]={'date':str(stamp.astimezone(CST).date()),
                 'available_quantity':value,'base_quantity':item['quantity'],'confirmed_at':stamp.isoformat(),
                 'name':item['name'],'source':'broker_screenshot'}
+    from trade_reconciliation import matches_receipt
+    receipt = cfg.get('trade_reconciliation') or {}
+    checked_at = parse_provider_time(receipt.get('broker_asof'))
+    if (matches_receipt(cfg, receipt) and checked_at and checked_at <= now
+            and checked_at.astimezone(CST).date() == now.astimezone(CST).date()):
+        for code, checked in receipt.get('positions', {}).items():
+            p = positions.get(code)
+            available = checked.get('available_quantity')
+            if not p or checked.get('quantity') != p['quantity'] or type(available) is not int or not 0 <= available <= p['quantity']:
+                continue
+            old = data['availability'].get(code) or {}
+            prior = parse_provider_time(old.get('confirmed_at'))
+            if prior and prior > checked_at:
+                continue
+            data['availability'][code] = {'date': str(checked_at.astimezone(CST).date()),
+                'available_quantity': available, 'base_quantity': p['quantity'],
+                'confirmed_at': checked_at.isoformat(), 'name': p['name'], 'source': 'broker_balance'}
     # Evidence changes must invalidate previously computed T observations even
     # when quantities/cost/cash happen to be unchanged.
     data['revision']=hashlib.sha256(json.dumps([data.get('revision'),data['availability']],
@@ -63,6 +80,8 @@ def ledger(output,cfg,now=None):
         paired=int(cycle.get('buyback_quantity',0))
         cycle['unbought_quantity']=int(cycle['quantity'])-paired
         cycle.update(summarize_cycle_costs(cycle))
+        from t_engine import closeout_summary
+        cycle['closeout'] = closeout_summary(cycle, data.get('fee_model'), fee_samples(cfg, data))
     return data
 
 
@@ -245,8 +264,16 @@ def close_cycle(output,cfg,cycle_id,body,now=None):
     now=now or datetime.now(CST)
     with storage.locked(output):
         data=ledger(output,cfg,now);cycle=next((x for x in data['cycles'] if x['id']==cycle_id),None)
-        if not cycle or cycle['status']!='open':raise ValueError('未找到待结束的T记录')
-        cycle.update(status='cash',closed_at=now.isoformat());_save(output,data)
+        if not cycle or cycle['status'] not in ('open', 'cash'):raise ValueError('未找到待结束的T记录')
+        remaining=int(cycle['quantity'])-int(cycle.get('buyback_quantity',0))
+        requested=body.get('remaining_quantity')
+        if requested is not None and (type(requested) is not int or requested != remaining):
+            raise ValueError('尚未接回数量已变化，请刷新并核对最新成交后再结束本轮')
+        if remaining <= 0:raise ValueError('本轮已全部接回，无需按保留现金结束')
+        if cycle['status']=='cash':return cycle
+        cycle.update(status='cash',closed_at=now.isoformat(),closeout_confirmed_quantity=remaining,
+                     closeout_snapshot=cycle.get('closeout'),closure_kind='retain_cash')
+        _save(output,data)
     return cycle
 
 
@@ -271,12 +298,16 @@ def refresh_minutes_async(output,cfg,now=None):
 def observe(output,cfg,quotes,risk,*,now=None,market_session=False,calendar_ok=False):
     from t_engine import build_t_observations
     now=now or datetime.now(CST)
-    if not settings(cfg)['enabled']:return {'enabled':False,'rows':[],'signals':[],'status':'做T观察未启用'}
     try:
         book=ledger(output,cfg,now);cache=storage.read(Path(output)/'t_minutes.json')
+        enabled=settings(cfg)['enabled']
+        closeout_due=now.hour==14 and now.minute>=45 and any(
+            cycle.get('status')=='open' and cycle.get('date')==str(now.date()) for cycle in book['cycles'])
+        if not enabled and not closeout_due:
+            return {'enabled':False,'rows':[],'signals':[],'status':'做T观察未启用'}
         minutes=cache.get('by_code',{})
         result=build_t_observations(cfg,quotes,risk,minutes,{**book,'fee_samples':fee_samples(cfg,book)},now=now,market_session=market_session,calendar_ok=calendar_ok)
-        result.update(enabled=True,asof=now.isoformat(),settings=settings(cfg,book),cycles=book['cycles'][-30:],availability=book['availability'],ledger_revision=book.get('revision'),
+        result.update(enabled=enabled,asof=now.isoformat(),settings=settings(cfg,book),cycles=book['cycles'][-30:],availability=book['availability'],ledger_revision=book.get('revision'),
                       status='做T条件观察；不自动交易。普通风险减仓不会产生接回提醒。')
         return result
     except Exception as exc:

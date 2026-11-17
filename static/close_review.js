@@ -54,8 +54,11 @@ function render(data) {
   byId('cash').textContent = money(cash.broker_available_cash);
   byId('withdrawable').textContent = '券商可取 ' + money(cash.broker_withdrawable_cash);
   byId('proceeds').textContent = money(cash.estimated_proceeds_sellable);
-  byId('after-sales').textContent = '可卖部分成交后预计现金 ' + money(cash.cash_after_planned_sales);
-  byId('buy-budget').textContent = '全部成交后预计现金 ' + money(cash.cash_after_all_planned_sales);
+  byId('after-sales').textContent = '预留后保守现金 ' + money(cash.cash_after_planned_sales)
+    + ' · 预计手续费 ' + (cash.estimated_fees == null ? '待补' : money(cash.estimated_fees))
+    + ' · 额外预留 ' + money(cash.safety_reserve);
+  byId('buy-budget').textContent = '全部成交后保守现金 ' + money(cash.cash_after_all_planned_sales)
+    + '（预留不代表实际损失）';
   byId('reserve').textContent = money(cash.minimum_reserve);
   byId('count').textContent = '当前持仓 ' + data.position_count + ' 只';
 
@@ -63,7 +66,9 @@ function render(data) {
     cell(item.name, [item.code, item.theme || item.sector].filter(Boolean).join(' · ')),
     cell(quantity(item.quantity)),
     cell(price(item.price)),
-    cell(money(item.value), '仓位预计减少 ' + item.exposure_reduction_pct.toFixed(2) + ' 个百分点'),
+    cell(money(item.value), '预计手续费 ' + (item.estimated_fee == null ? '待补' : money(item.estimated_fee))
+      + ' · 额外预留 ' + money(item.safety_reserve)
+      + ' · 仓位预计减少 ' + item.exposure_reduction_pct.toFixed(2) + ' 个百分点'),
     explanation(item.reason),
   ));
   rows('pending-sells', data.pending_sell_plan, '当前没有待确认可卖计划', item => tableRow(

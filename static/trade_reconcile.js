@@ -112,15 +112,20 @@ async function refresh(message) {
     ' · 期间净转入 ' + money(pnl.net_external_flow) + ' · 起点 ' + pnl.from.slice(0, 19).replace('T', ' ');
   const checked = [data.last_checked, data.last_snapshot].filter(Boolean).sort().at(-1);
   status(message || '本地可用现金 ' + money(data.cash) +
+    ' · 冻结资金 ' + money(data.frozen_cash ?? 0) +
+    ' · 可取资金 ' + money(data.withdrawable_cash) +
     (checked ? ' · 最近台账核对 ' + checked.slice(0, 19).replace('T', ' ') : ''));
+  fields.frozen_cash.value = data.frozen_cash ?? 0;
   form.hidden = false;
 }
 
 function updateMode() {
   const csv = fields.mode.value === 'csv';
+  const balance = fields.mode.value === 'balance';
   const trade = ['buy', 'sell'].includes(fields.side.value);
-  byId('manual').hidden = byId('manual').disabled = csv;
+  byId('manual').hidden = byId('manual').disabled = csv || balance;
   byId('csv').hidden = byId('csv').disabled = !csv;
+  byId('balance-only').hidden = byId('balance-only').disabled = !balance;
   byId('trade-fields').hidden = byId('trade-fields').disabled = !trade;
   byId('flow-field').hidden = fields.amount.disabled = trade;
 }
@@ -137,12 +142,13 @@ function collectBalances() {
     positions[code] = { quantity: row.quantity.value, available_quantity: row.available.value };
   }
   return { asof: fields.asof.value, available_cash: fields.available_cash.value,
+    frozen_cash: fields.frozen_cash.value,
     withdrawable_cash: fields.withdrawable_cash.value, total_assets: fields.total_assets.value, positions };
 }
 
 form.addEventListener('input', invalidate);
 form.addEventListener('input', () => { editVersion += 1; });
-form.addEventListener('change', updateMode);
+form.addEventListener('change', () => { updateMode(); invalidate(); editVersion += 1; });
 form.addEventListener('submit', async event => {
   event.preventDefault();
   invalidate();
@@ -152,7 +158,11 @@ form.addEventListener('submit', async event => {
   button.disabled = true;
   try {
     const data = { broker: collectBalances() };
-    if (fields.mode.value === 'csv') {
+    const balance = fields.mode.value === 'balance';
+    if (balance) {
+      data.mode = 'balance_only';
+      data.no_activity = fields.no_activity.checked;
+    } else if (fields.mode.value === 'csv') {
       data.csv = await fields.file.files[0].text();
     } else {
       const row = {};
@@ -162,21 +172,26 @@ form.addEventListener('submit', async event => {
       if (alertId) row.alert_id = alertId;
       data.events = [row];
     }
-    const result = await api('/api/trade-reconcile/preview', data);
+    const result = await api(balance ? '/api/account-balance/preview' : '/api/trade-reconcile/preview', data);
     if (version !== editVersion) {
       status('表单在核对期间已修改，请重新预览。', true);
       return;
     }
     for (const row of result.positions) addHolding(row.code, row.code, row.quantity);
-    byId('preview-summary').textContent = '台账可用现金 ' + money(result.cash_before) +
-      ' → ' + money(result.cash_after) + ' · ' + result.events.length + ' 条新增 · ' +
+    byId('preview-summary').textContent = balance ?
+      '可用现金 ' + money(result.cash_before) + ' → ' + money(result.cash_after) +
+      ' · 冻结资金 ' + money(result.frozen_before) + ' → ' + money(result.frozen_after) +
+      ' · 总现金 ' + money(result.total_cash_before) + ' → ' + money(result.total_cash_after) :
+      '台账可用现金 ' + money(result.cash_before) + ' → ' + money(result.cash_after) +
+      ' · 冻结资金 ' + money(result.frozen_after ?? 0) + ' · ' + result.events.length + ' 条新增 · ' +
       result.duplicates.length + ' 条已计入或重复';
     const differences = byId('differences');
     differences.replaceChildren(...result.differences.map(text => element('li', text)));
     differences.hidden = !result.differences.length;
-    renderRows(byId('preview-rows'), result.events);
+    if (balance) byId('preview-rows').replaceChildren(element('p', '本次只核对账户余额和可卖数量，不生成成交或资金流水。'));
+    else renderRows(byId('preview-rows'), result.events);
     byId('preview').hidden = false;
-    if (result.token) pending = { token: result.token, data };
+    if (result.token) pending = { token: result.token, data, balance };
     byId('confirm').hidden = !pending;
     status(result.differences.length ? '请核对差异后重新预览。' : '预览完成。', !!result.differences.length);
   } catch (error) {
@@ -191,7 +206,7 @@ byId('confirm').addEventListener('click', async () => {
   const button = byId('confirm');
   button.disabled = true;
   try {
-    const result = await api('/api/trade-reconcile/confirm', pending);
+    const result = await api(pending.balance ? '/api/account-balance/confirm' : '/api/trade-reconcile/confirm', pending);
     invalidate();
     byId('preview').hidden = true;
     for (const key of ['fill_id', 'price', 'quantity', 'fee', 'amount', 'reference_price', 'planned_risk']) fields[key].value = '';

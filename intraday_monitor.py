@@ -25,7 +25,8 @@ from quote_health import assess, parse_provider_time
 from risk_extensions import tier_alerts,risk_level
 from portfolio_journal import record_equity
 from account_snapshot import save_display_snapshot
-from alert_journal import capture_rows, persist_cycle
+from alert_journal import capture_rows, persist_cycle, followup_signals, ledger_notice
+from reminder_policy import apply_policy
 import strategy_runtime as strategy
 import t_runtime as t_runtime
 
@@ -240,7 +241,7 @@ def dedup_events(events,day, *, demo):
 def native_notice(e):
     if platform.system()!='Darwin':return False
     observation = not e.get('side') and e.get('category') in ('t', 'reduce') and e.get('code') != 'PORT'
-    msg = ('这是衡势桌面提醒测试，请查看横幅或通知中心。' if e.get('test') else
+    msg = (e.get('reason') if ledger_notice(e) else '这是衡势桌面提醒测试，请查看横幅或通知中心。' if e.get('test') else
            f"{e['name']} {e['kind']}：价格/回撤 {e['price']}；参考位 {e['level']}，请核对券商行情"
            + ('。仅条件观察，不提供下单数量。' if observation else ''))
     applescript='display notification '+json.dumps(msg,ensure_ascii=False)+' with title "衡势 · 盘中提醒（非委托）"'
@@ -420,7 +421,7 @@ def single_cycle(*,mode,notify=False,force_demo=False,probe=False,interval=10):
     if strategy.enabled(cfg) and not demo and not probe:
         strategy.refresh_evidence_async(OUT,cfg)
         verified=bool(market_open and cal_ok and health['all_held_usable'] and not health['block_trade_signals'])
-        equity=float(cfg.get('cash',0))+sum(float(feed[(p['type'],code_str(p['code']))][0])*int(p['quantity'])
+        equity=float(cfg.get('cash',0))+float(cfg.get('frozen_cash',0))+sum(float(feed[(p['type'],code_str(p['code']))][0])*int(p['quantity'])
                   for p in cfg.get('positions',[]) if int(p.get('quantity',0))>0 and (p['type'],code_str(p['code'])) in feed)
         try:account=strategy.observe(OUT,cfg,equity,verified=verified)
         except Exception as exc:
@@ -443,6 +444,7 @@ def single_cycle(*,mode,notify=False,force_demo=False,probe=False,interval=10):
         state['trading_dates']=dates
     state['quotes']=list(quotes.values())
     state['risk']={'valid':risk['valid'],'equity':risk['equity'],'used':risk['used'],'remaining':risk['remaining'],
+                   'cash':risk.get('cash'), 'frozen_cash':risk.get('frozen_cash', 0), 'total_cash':risk.get('total_cash'),
                    'existing_planned_stress':risk['existing_planned_stress'],'available_new_risk':risk['available_new_risk'],
                    'missing':risk['missing'],'pnl':risk['pnl'],
                    'budget':risk['budget'],'over_budget':risk['over_budget'],
@@ -454,11 +456,17 @@ def single_cycle(*,mode,notify=False,force_demo=False,probe=False,interval=10):
     state['fetch_finished_at']=dt.datetime.now(dt.timezone.utc).isoformat()
     active_signals=build_signals(cfg,quotes,risk,trading_day=now.date(),snapshot=state,now=dt.datetime.now(CST),
         market_session=market_open and not probe and not health['block_trade_signals'],calendar_ok=cal_ok,demo=demo)
-    if t_runtime.settings(cfg)['enabled'] and not demo and not probe:
-        t_runtime.refresh_minutes_async(OUT,cfg,now)
+    if not demo and not probe:
+        if t_runtime.settings(cfg)['enabled']:
+            t_runtime.refresh_minutes_async(OUT,cfg,now)
         state['t_observe']=t_runtime.observe(OUT,cfg,quotes,risk,now=dt.datetime.now(CST),
-            market_session=market_open and not health['block_trade_signals'],calendar_ok=cal_ok)
-        active_signals.extend(state['t_observe'].get('signals',[]))
+            market_session=market_open,calendar_ok=cal_ok)
+        active_signals.extend(s for s in state['t_observe'].get('signals',[])
+                              if not health['block_trade_signals'] or ledger_notice(s))
+        book = t_runtime.ledger(OUT, cfg, now)
+        active_signals = apply_policy(OUT, cfg, active_signals, now=now)
+        active_signals = followup_signals(OUT, active_signals, cfg.get('positions', []),
+            book.get('availability') or {}, cfg.get('reconciled_trades', []), now=now)
     state['trade_signals']=active_signals
     seen=read_json(SIGNAL_SENT,{'date':str(now.date()),'ids':[]})
     seen_ids=set(seen.get('ids',[])) if seen.get('date')==str(now.date()) else set()
@@ -505,12 +513,12 @@ def single_cycle(*,mode,notify=False,force_demo=False,probe=False,interval=10):
                     'name': '全账户', 'title': '行情暂停', 'trigger': 'quote_pause',
                     'category': 'diagnostic', 'reason': state['status'],
                     'blockers': [f'待核验证券 {affected}'] if affected else [],
-                }]
+                }] + [s for s in active_signals if ledger_notice(s)]
             archived = persist_cycle(
                 STATUS_FILE.parent,
                 capture_rows(recording_events, recording_signals, quotes, cfg.get('trade_plans', {}),
                              now=journal_clock, source=state['data_source'], config_hash=cfg_hash),
-                now=journal_clock, notify=notify and not health['block_trade_signals'],
+                now=journal_clock, notify=notify,
                 send=lambda row:native_notice({**row,'sound':(cfg.get('execution_preferences') or {}).get('native_sound') is True}),
                 clock=now_cn, trades=cfg.get('reconciled_trades',[]),
                 inactive_reason=lambda row: inactive_alert_reason(

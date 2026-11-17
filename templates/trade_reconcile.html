@@ -8,7 +8,7 @@
   <link rel="icon" href="/static/hengshi-logo.svg">
   <link rel="stylesheet" href="/static/v1_backtest.css">
   <link rel="stylesheet" href="/static/trade_reconcile.css">
-  <script src="/static/trade_reconcile.js" defer></script>
+  <script src="/static/trade_reconcile.js?v=2" defer></script>
   {% include '_live_reminder_assets.html' %}
 </head>
 <body>
@@ -24,7 +24,11 @@
   <form id="reconcile-form" hidden>
     <section class="panel">
       <div class="section-head"><div><h2>本次新增流水</h2><p>请录入尚未计入当前台账的成交或转账，按发生顺序填写。</p></div></div>
-      <label>录入方式 <select name="mode"><option value="manual">手工录入一笔</option><option value="csv">选择 CSV 文件</option></select></label>
+      <label>本次核对 <select name="mode"><option value="manual">手工录入一笔</option><option value="csv">选择 CSV 文件</option><option value="balance">无新增流水，只核对账户余额</option></select></label>
+      <fieldset id="balance-only" hidden disabled>
+        <label><input name="no_activity" type="checkbox" required>确认从上次台账核对至本次账户时间，没有未登记的成交或资金转账。</label>
+        <p class="subtle">可用现金和冻结资金可以互相转移，但两者总额与全部持仓须和台账一致。有差额时请先登记真实流水；此操作不重置风险基准或确认退出计划。</p>
+      </fieldset>
       <fieldset id="manual" class="form-grid">
         <p id="alert-context" class="wide subtle" hidden></p>
         <label>发生时间（北京）<input name="executed_at" type="datetime-local" step="1" required></label>
@@ -52,13 +56,14 @@
       <div class="form-grid">
         <label>账户时间（北京）<input name="asof" type="datetime-local" step="1" required></label>
         <label>券商可用现金（元）<input name="available_cash" type="number" min="0" step="0.01" required></label>
+        <label>券商冻结资金（元）<input name="frozen_cash" type="number" min="0" step="0.01" value="0" required></label>
         <label>券商可取资金（选填）<input name="withdrawable_cash" type="number" min="0" step="0.01"></label>
         <label>券商总资产（选填）<input name="total_assets" type="number" min="0.01" step="0.01"></label>
       </div>
       <div id="holdings-wrap" class="table-wrap" hidden>
         <table><thead><tr><th>证券</th><th>本地／计算持仓</th><th>券商持仓</th><th>券商可卖</th></tr></thead><tbody id="broker-positions"></tbody></table>
       </div>
-      <p class="subtle">如要用于收盘复盘，可同时核对每只未变动的持仓。部分成交或清仓也按券商显示填写。</p>
+      <p class="subtle">余额核对必须填写今天的全部持仓和可卖量。可用资金用于买入额度；冻结资金仅计入账户资产，不可重复当作可用资金。部分成交或清仓请使用实际流水对账。</p>
       <button id="preview-button" type="submit">预览对账</button>
     </section>
   </form>

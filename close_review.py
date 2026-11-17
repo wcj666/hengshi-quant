@@ -12,13 +12,10 @@ from math import ceil, floor, isfinite
 from strategy_setup import exit_review
 from strategy_v1 import strategy_prefs
 from trade_levels import config_plan, make_levels
+from t_costs import cash_impact, money
 
 
 EXIT_LABELS = {"stop": "固定止损", "take_profit_2": "固定第二止盈", "take_profit_1": "固定第一止盈"}
-
-def money(value):
-    return round(float(value) + 1e-9, 2)
-
 
 def _number(value, default=None):
     if isinstance(value, bool):
@@ -34,13 +31,6 @@ def _lot(value, *, up=False):
     if value <= 0:
         return 0
     return int((ceil if up else floor)(value / 100.0) * 100)
-
-
-def _fee(kind, side, notional):
-    commission = max(5.0, notional * 0.0005)
-    stamp = notional * 0.0005 if kind == "stock" and side == "sell" else 0.0
-    transfer = notional * 0.00001 if kind == "stock" else 0.0
-    return money(commission + stamp + transfer)
 
 
 def _quote_map(quotes):
@@ -224,7 +214,7 @@ def reduction_draft(rows, equity, settings):
 
 
 def build_close_review(config, snapshot, quotes, candidates=None, *, asof=None,
-                       data_verified=False, quote_errors=None):
+                       data_verified=False, quote_errors=None, fee_model=None, fee_samples=None):
     """Plan fixed exits first, then reduce concentrated and excess exposure."""
     settings = strategy_prefs(config)
     max_exposure_pct = settings["max_exposure_pct"]
@@ -235,10 +225,13 @@ def build_close_review(config, snapshot, quotes, candidates=None, *, asof=None,
     quotes = _quote_map(quotes)
     rows = _position_rows(config, snapshot, quotes)
     cash = _number(snapshot.get("available_cash"))
+    frozen_cash = _number(snapshot.get('frozen_cash', config.get('frozen_cash', 0)))
+    total_cash = money(cash + frozen_cash) if cash is not None and frozen_cash is not None else None
     withdrawable_cash = _number(snapshot.get("withdrawable_cash"))
     if cash is None or withdrawable_cash is None or not 0 <= withdrawable_cash <= cash:
         withdrawable_cash = None
-    complete = bool(snapshot and cash is not None and cash >= 0 and all(
+    complete = bool(snapshot and cash is not None and cash >= 0
+        and frozen_cash is not None and frozen_cash >= 0 and all(
         row["quantity"] > 0 and row["price"] is not None and row["previous_close"] is not None
         and row["source_timestamp"] for row in rows
     ))
@@ -247,7 +240,7 @@ def build_close_review(config, snapshot, quotes, candidates=None, *, asof=None,
         errors.append("账户快照或完整持仓行情缺失")
 
     market_value = money(sum(row["value"] or 0 for row in rows)) if complete else None
-    equity = money(cash + market_value) if complete else None
+    equity = money(total_cash + market_value) if complete else None
     can_plan = bool(complete and data_verified and equity > 0)
     try:
         clock = datetime.fromisoformat((asof or snapshot.get("asof") or "").replace("Z", "+00:00"))
@@ -288,15 +281,29 @@ def build_close_review(config, snapshot, quotes, candidates=None, *, asof=None,
                 "detail": reasons,
             })
 
-    def net_proceeds(quantities):
-        gross = {code: money(positions[code]["price"] * quantity)
-                 for code, quantity in quantities.items() if quantity}
-        return money(sum(value - _fee(positions[code]["type"], "sell", value)
-                         for code, value in gross.items()))
+    def cost_summary(quantities):
+        legs = {code: cash_impact(positions[code]['type'], 'sell',
+                    money(positions[code]['price'] * quantity), fee_reserve,
+                    fee_model or {}, fee_samples or ())
+                for code, quantity in quantities.items() if quantity}
+        known = all(leg['estimated_fee'] is not None for leg in legs.values())
+        return {'legs': legs,
+                'conservative_proceeds': money(sum(leg['conservative_cash_delta'] for leg in legs.values())),
+                'estimated_proceeds': money(sum(leg['estimated_cash_delta'] for leg in legs.values())) if known else None,
+                'estimated_fees': money(sum(leg['estimated_fee'] for leg in legs.values())) if known else None,
+                'safety_reserve': money(sum(leg['safety_reserve'] for leg in legs.values())),
+                'reserved_cost': money(sum(leg['reserved_cost'] for leg in legs.values()))}
 
-    proceeds = net_proceeds(available_by_code) if can_plan else None
-    pending_quantities = {item["code"]: item["quantity"] for item in pending_sell_plan}
-    all_proceeds = money(proceeds + net_proceeds(pending_quantities)) if can_plan else None
+    costs = cost_summary(available_by_code) if can_plan else {}
+    all_costs = cost_summary(requested_by_code) if can_plan else {}
+    for plan in sell_plan:
+        leg = costs['legs'][plan['code']]
+        plan.update(estimated_fee=leg['estimated_fee'], fee_basis=leg['fee_basis'],
+                    safety_reserve=leg['safety_reserve'], reserved_cost=leg['reserved_cost'],
+                    estimated_net_proceeds=leg['estimated_cash_delta'],
+                    conservative_net_proceeds=leg['conservative_cash_delta'])
+    proceeds = costs.get('conservative_proceeds')
+    all_proceeds = all_costs.get('conservative_proceeds')
     cash_after_sales = money(cash + proceeds) if can_plan else None
     cash_after_all_sales = money(cash + all_proceeds) if can_plan else None
     excess_after_all_sales = money(max(0.0, cash_after_all_sales - target_reserve)) if cash_after_all_sales is not None else None
@@ -334,6 +341,8 @@ def build_close_review(config, snapshot, quotes, candidates=None, *, asof=None,
         "account_asof": snapshot.get("asof"),
         "equity": equity,
         "cash": cash,
+        "frozen_cash": frozen_cash,
+        "total_cash": total_cash,
         "market_value": market_value,
         "current_exposure_pct": current_exposure_pct,
         "position_count": len(rows),
@@ -344,8 +353,19 @@ def build_close_review(config, snapshot, quotes, candidates=None, *, asof=None,
         "cash_policy": {
             "broker_available_cash": cash,
             "broker_withdrawable_cash": withdrawable_cash,
+            "broker_frozen_cash": frozen_cash,
+            "broker_total_cash": total_cash,
             "estimated_proceeds_sellable": proceeds,
             "estimated_proceeds_all": all_proceeds,
+            "net_proceeds_estimate": costs.get('estimated_proceeds'),
+            "net_proceeds_all_estimate": all_costs.get('estimated_proceeds'),
+            "estimated_fees": costs.get('estimated_fees'),
+            "safety_reserve": costs.get('safety_reserve'),
+            "reserved_cost": costs.get('reserved_cost'),
+            "all_estimated_fees": all_costs.get('estimated_fees'),
+            "all_safety_reserve": all_costs.get('safety_reserve'),
+            "all_reserved_cost": all_costs.get('reserved_cost'),
+            "cash_after_sales_estimate": money(cash + costs['estimated_proceeds']) if costs.get('estimated_proceeds') is not None else None,
             "minimum_reserve": target_reserve,
             "cash_after_planned_sales": cash_after_sales,
             "available_for_new_buys": 0.0 if can_plan else None,
@@ -359,7 +379,9 @@ def build_close_review(config, snapshot, quotes, candidates=None, *, asof=None,
         "buy_plan": buy_plan,
         "notes": [
             "卖出数量按100股/份整数手和已确认可卖数量计算。",
-            "卖出回款以已核验收盘价扣除预估费用测算，实际委托前核对券商可卖数、停牌和价格限制。",
+            "冻结资金计入总资产和仓位分母，但不计入可买资金或可用现金目标；解冻后须重新核对券商余额。",
+            "保守回款以已核验收盘价扣除预计手续费和额外安全预留测算；预留不是实际费用或损失。费率未知时手续费与仅扣费回款保持待补。",
+            "全部计划按每只证券一次卖出测算；实际分批成交的费用按券商流水重新对账。实际委托前核对可卖数、停牌和价格限制。",
             "预计仓位以相同的收盘估算总资产为基准。新增买入股数由盘中 V1 核验。",
         ],
     }

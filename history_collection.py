@@ -282,6 +282,13 @@ def auto_validate(bundle, settings, work, runtime_output):
     status = {'status': '已完成自动分段' if qualified else '已分段，部分或全部仍待验证',
               'message': '自动按时间分段，样本不足仍保留待验证。固定止损纳入风控。'}
     save_comparison(result, runtime_output/'v1_validation')
+    cfg_path = runtime_output.parent / 'config.json'
+    if cfg_path.is_file():
+        from reminder_policy import publish_evidence
+        try:
+            publish_evidence(runtime_output, _read_dict(cfg_path), bundle, result)
+        except ValueError as exc:
+            status['message'] += ' 提醒等级保持待验证：' + str(exc)
     write(work/'validation.json', {'digest': digest, 'status': status})
     return status
 

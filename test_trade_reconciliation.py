@@ -70,6 +70,20 @@ class ReconciliationTests(TestCase):
         with self.assertRaisesRegex(ValueError, '可卖量不能超过'):
             reconciliation.prepare(START, data, now=TIME)
 
+    def test_trade_cash_reconciliation_includes_frozen_balance_changes(self):
+        cfg = deepcopy(START)
+        cfg.update(cash=800, frozen_cash=200)
+        data = batch()
+        data['broker'].update(available_cash=2995, frozen_cash=100)
+        updated, preview = reconciliation.prepare(cfg, data, now=TIME)
+        self.assertEqual(preview['differences'], [])
+        self.assertEqual((updated['cash'], updated['frozen_cash']), (2995., 100.))
+        self.assertEqual(preview['cash_after'], 2995.)
+        self.assertEqual(reconciliation.close_snapshot(updated)['frozen_cash'], 100.)
+        data['broker']['frozen_cash'] = 99
+        _, preview = reconciliation.prepare(cfg, data, now=TIME)
+        self.assertTrue(preview['differences'])
+
     def test_web_preview_stale_tokens_and_confirm_are_safe(self):
         with TemporaryDirectory() as folder:
             file = Path(folder) / 'config.json'

@@ -203,19 +203,27 @@
       const entry = tableRows.get(row.code);
       if (!entry) continue;
       textCell(entry.remaining, num(row.remaining_quantity), '仓位 ' + pct(row.remaining_weight_pct));
-      if (row.sell_quantity > 0) textCell(entry.proceeds, money(row.net_proceeds), '费用 ' + money(row.fee));
+      if (row.sell_quantity > 0) textCell(entry.proceeds, money(row.net_proceeds),
+        '预计手续费 ' + (row.estimated_fee == null ? '待补' : money(row.estimated_fee))
+        + ' · 额外预留 ' + money(row.safety_reserve));
     }
     const gap = preview.cash_shortfall;
     const metrics = byId('metrics');
     metrics.replaceChildren(
-      metric('预计净回款', money(preview.net_proceeds), '费用合计 ' + money(preview.fees)),
-      metric('卖后可用现金', money(preview.cash_after), '当前 ' + money(preview.cash_before)),
-      metric('卖后权益仓位', pct(preview.exposure_after_pct), '当前 ' + pct(preview.exposure_before_pct)),
+      metric('预计净回款（预留后）', money(preview.net_proceeds),
+        '预计手续费 ' + (preview.estimated_fees == null ? '待补' : money(preview.estimated_fees))
+        + ' · 额外预留 ' + money(preview.safety_reserve)),
+      metric('卖后可用现金（保守）', money(preview.cash_after),
+        '仅扣预计手续费后 ' + money(preview.estimated_cash_after) + ' · 预留不代表损失'),
+      metric('卖后权益仓位', pct(preview.exposure_after_pct),
+        '当前 ' + pct(preview.exposure_before_pct)
+        + (preview.estimated_equity_after == null ? ' · 费率待补，按预算保守测算' : ' · 预留仍计入账户资产')),
       metric('卖后持仓市值', money(preview.market_value_after), '剩余 ' + num(preview.remaining_count) + ' 只'),
       metric('距离现金目标', Number.isFinite(gap) && gap === 0 ? '已达目标' : money(gap),
         '现金目标 ' + money(preview.cash_target) + ' · ' + pct(response.cash_target_pct)),
     );
     if (response.fee_note) notes.append(make('p', response.fee_note, 'tip'));
+    if (preview.equity_basis) notes.append(make('p', preview.equity_basis, 'tip'));
     metrics.hidden = false;
   }
 

@@ -53,6 +53,36 @@ def estimate_leg(kind, side, notional, model, samples):
     return (expected, 'broker_terms') if expected is not None else (None, 'reserve')
 
 
+def cash_impact(kind, side, notional, reserve, model=None, samples=()):
+    """Separate estimated charges from cash held aside for a planned fill.
+
+    ``reserve`` is the minimum total cash deduction budget, not a brokerage
+    charge. Unknown terms remain unknown; only the conservative cash delta may
+    use the reserve. No value returned here is an actual execution or fee.
+    """
+    amount, floor = nonnegative(notional), nonnegative(reserve)
+    if amount is None or floor is None or side not in ('buy', 'sell'):
+        raise ValueError('成交金额、费用预留或买卖方向无效')
+    if not amount:
+        estimate, basis = 0., 'no_trade'
+    elif kind in ('stock', 'etf'):
+        estimate, basis = estimate_leg(kind, side, amount, model or {}, samples or ())
+    else:
+        estimate, basis = None, 'reserve'
+    reserved = max(decimal(floor), decimal(estimate or 0)) if amount else Decimal(0)
+    reserved = reserved.quantize(CENT, rounding=ROUND_CEILING)
+    extra = reserved - decimal(estimate or 0)
+    signed_amount = decimal(amount) * (1 if side == 'sell' else -1)
+    return {
+        'estimated_fee': estimate,
+        'fee_basis': basis,
+        'safety_reserve': money(extra, ROUND_CEILING),
+        'reserved_cost': money(reserved, ROUND_CEILING),
+        'estimated_cash_delta': money(signed_amount - decimal(estimate)) if estimate is not None else None,
+        'conservative_cash_delta': money(signed_amount - reserved),
+    }
+
+
 def roundtrip(kind, sell_price, quantity, reserve, model, samples, *, sell_fee=None):
     """Estimate a cost-covering buyback cap at the instrument's price tick."""
     notional = float(decimal(sell_price) * quantity)

@@ -125,8 +125,9 @@ def _fees(plan,settings,remaining=False):
 
 
 def compute_strategy(cfg,quotes,fresh=False,watch_quotes=None,previous_closes=None,strategy_account=None,legacy_settings=None):
+    from risk_engine import cash_balances
     settings=dict(legacy_settings or {});settings.update(strategy_prefs(cfg))
-    quotes=quotes or {};cash=float(cfg.get('cash',0));base=float(cfg['baseline_equity'])
+    quotes=quotes or {};cash,frozen_cash=cash_balances(cfg);base=float(cfg['baseline_equity'])
     cap=settings['account_risk_budget'];rows=[];missing=[];breaches=[];unknown_stops=[];unknown_sectors=[]
     exposure=0.;stress=0.;sector_values={};single_excess=[]
     for position in cfg.get('positions',[]):
@@ -155,7 +156,7 @@ def compute_strategy(cfg,quotes,fresh=False,watch_quotes=None,previous_closes=No
                      'sector':sector,'stop_breached':breached,'planned_stop_pct':None,
                      'future_fee_reserve':fee,'planned_stress':round(planned,2) if planned is not None else None})
     valid=bool(fresh and not missing)
-    equity=round(cash+exposure,2) if valid else None
+    equity=round(cash+frozen_cash+exposure,2) if valid else None
     pnl=calculate_pnl(cfg,quotes,previous_closes,valid=valid)
     for row in rows:row.update(pnl.get('positions',{}).get(row['code'],{}))
     account,blockers,account_verified=_account_state(strategy_account,settings)
@@ -195,7 +196,8 @@ def compute_strategy(cfg,quotes,fresh=False,watch_quotes=None,previous_closes=No
              'change':round(equity-base,2) if valid else None,'used':round(used,2) if used is not None else None,
              'remaining':round(remaining,2) if remaining is not None else None,
              'existing_planned_stress':planned_stress,'available_new_risk':round(available,2),
-             'cash':cash,'exposure':round(exposure,2) if valid else None,'missing':missing,
+             'cash':cash,'frozen_cash':frozen_cash,'total_cash':round(cash+frozen_cash,2),
+             'exposure':round(exposure,2) if valid else None,'missing':missing,
              'stop_breaches':breaches,'over_budget':over_budget,'positions':rows,'settings':settings,
              'sizing':[],'pnl':pnl,
              'strategy':{'enabled':True,'version':'1.0','blockers':blockers,'transition':transition,

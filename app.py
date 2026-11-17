@@ -26,6 +26,8 @@ def load_config(path):
     # 不能再强制现有持仓按旧基准价加总等于历史净值。
     if cfg['baseline_equity'] <= 0 or cfg['cash'] < 0:
         raise ValueError('账户基准必须为正、现金不能为负')
+    from risk_engine import cash_balances
+    cash_balances(cfg)
     return cfg
 
 
@@ -182,7 +184,7 @@ def portfolio(cfg,quotes,mode):
     if missing:
         equity=None; loss=None;remain=None
     else:
-        equity=round(float(df['当前市值'].sum())+cfg['cash'],2)
+        equity=round(float(df['当前市值'].sum())+cfg['cash']+cfg.get('frozen_cash',0),2)
         loss=round(cfg['baseline_equity']-equity,2)
         remain=round(cfg['max_additional_loss']-max(0,loss),2)
     return df,missing,equity,loss,remain

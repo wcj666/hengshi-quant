@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 import hashlib
 import math
 from quote_health import parse_provider_time
-from t_costs import money, roundtrip, sold_fee_for_quantity, decimal, TICKS, ROUND_CEILING, ROUND_FLOOR
+from t_costs import money, roundtrip, sold_fee_for_quantity, decimal, estimate_leg, nonnegative, TICKS, ROUND_CEILING, ROUND_FLOOR
 
 CN=ZoneInfo('Asia/Shanghai')
 RISK_EXITS={'stop','take_profit_1','take_profit_2','structure_support','structure_weakness','time_5','time_10'}
@@ -28,6 +28,7 @@ def _positive(value):
 
 
 def _integer(value):
+    if isinstance(value, bool):return None
     x=_number(value,0)
     return int(x) if x is not None and int(x)==x else None
 
@@ -92,12 +93,125 @@ def _risk_conflict(cfg,position,quote,risk,price):
 
 def _signal(row,clock,cycle_id=''):
     ident=hashlib.sha256(f'{clock.date()}|t|{row["code"]}|{row["phase"]}|{cycle_id}'.encode()).hexdigest()[:20]
-    return {'id':ident,'category':'t','code':row['code'],'name':row['name'],
+    result = {'id':ident,'category':'t','code':row['code'],'name':row['name'],
             'title':row['status'],'reason':row['reason'],'trigger':row['phase'],
             'price':row['price'],'level':row.get('target_buy') if row['phase']=='buyback_ready' else row.get('target_sell'),
             'shares':row.get('quantity'),'held':True,'day':str(clock.date()),'priority':'normal',
             'tradable':row.get('tradable',False),'blockers':row.get('blockers',[]),
             'data_note':'做T条件观察，不自动下单；须核对券商可卖数及实际成交。价差与费用为估算，不能保证收益。'}
+    if cycle_id:
+        result['cycle_id'] = cycle_id
+    if row['phase'] == 'carry_cash':
+        result.update(ledger_notice=True, source_kind='actual_t_ledger', cycle_id=cycle_id,
+                      closeout=row['closeout'], expires_at=clock.replace(hour=15, minute=0, second=0, microsecond=0).isoformat(),
+                      held=row.get('held', True),
+                      data_note='仅核对已登记实际T成交；未接回部分保留现金，不生成买卖指令或虚构接回。')
+    return result
+
+
+def closeout_summary(cycle, model=None, samples=None):
+    """Summarize recorded T cash flow without requiring or substituting a quote.
+
+    This is a cycle cash flow, not account buying power and not realized profit
+    for the still-unmatched sale. Missing fees always keep actual net cash null.
+    """
+    if cycle.get('kind', 'stock') not in ('stock', 'etf'):
+        return None
+    sold = _integer(cycle.get('quantity'))
+    bought = _integer(cycle.get('buyback_quantity', 0))
+    sell_price = _positive(cycle.get('sell_price'))
+    buy_cost = nonnegative(cycle.get('buyback_cost', 0))
+    if not sold or bought is None or bought > sold or not sell_price or buy_cost is None:
+        return None
+    fills = cycle.get('fills') or []
+    if not isinstance(fills, list):
+        return None
+    parsed = []
+    for fill in fills:
+        if not isinstance(fill, dict):
+            return None
+        qty, price = _integer(fill.get('quantity')), _positive(fill.get('price'))
+        if not qty or not price:
+            return None
+        parsed.append((qty, price, nonnegative(fill.get('fee'))))
+    covered = sum(qty for qty, _, _ in parsed)
+    recorded_cost = sum(decimal(qty) * decimal(price) for qty, price, _ in parsed)
+    matched = covered == bought and abs(recorded_cost - decimal(buy_cost)) <= decimal('.01')
+    sell_gross = decimal(sold) * decimal(sell_price)
+    gross_cash = sell_gross - decimal(buy_cost)
+    sell_fee = nonnegative(cycle.get('sell_fee'))
+    known = decimal(sell_fee or 0) + sum(decimal(fee) for _, _, fee in parsed if fee is not None)
+    complete = matched and sell_fee is not None and all(fee is not None for _, _, fee in parsed)
+    estimated, bases, unknown_fee = known, [], False
+    reserve = max(20., _positive(cycle.get('fee_reserve')) or 20.)
+    kind = cycle.get('kind', 'stock')
+    if sell_fee is None:
+        fee, basis = estimate_leg(kind, 'sell', float(sell_gross), model or {}, samples or [])
+        unknown_fee |= fee is None
+        estimated += decimal(fee if fee is not None else reserve)
+        bases.append(basis)
+    for qty, price, actual_fee in parsed:
+        if actual_fee is None:
+            fee, basis = estimate_leg(kind, 'buy', qty * price, model or {}, samples or [])
+            unknown_fee |= fee is None
+            estimated += decimal(fee if fee is not None else reserve)
+            bases.append(basis)
+    # Aggregate buybacks without their individual legs cannot prove order fees.
+    # Do not present a net estimate as complete when those fills are absent.
+    estimate = money(gross_cash - estimated) if matched and not unknown_fee else None
+    return {'cycle_id': cycle.get('id'), 'sold_quantity': sold, 'buyback_quantity': bought,
+            'remaining_quantity': sold - bought, 'sell_gross': money(sell_gross),
+            'buyback_gross': money(buy_cost), 'gross_cash_flow': money(gross_cash),
+            'actual_fee': money(known) if complete else None,
+            'estimated_fee': money(estimated) if matched and not complete and not unknown_fee else None,
+            'net_cash_actual': money(gross_cash - known) if complete else None,
+            'net_cash_estimate': estimate if not complete else None,
+            'cash_basis': 'actual' if complete else 'estimated' if matched and not unknown_fee else 'pending',
+            'conservative_cash_delta': money(gross_cash - estimated) if matched else None,
+            'fee_basis': bases, 'fills_verified': matched,
+            'ledger_sync_required': cycle.get('ledger_sync_required') is True,
+            'cash_note': '本轮净现金流包含未接回份额的卖出本金，不是全部已实现做T利润，也不是券商可用或可取余额。',
+            'fee_note': '实际成交费用已齐全' if complete else '费用或接回分笔记录未齐，净现金仅按已知资料估算；未知项保留待核。'}
+
+
+def _closeout_rows(cfg, cycles, ledger, clock):
+    positions = {str(p.get('code')).zfill(6): p for p in cfg.get('positions', [])}
+    result = []
+    for cycle in cycles:
+        if cycle.get('status') != 'open' or cycle.get('date') != str(clock.date()):
+            continue
+        ident = cycle.get('id')
+        if not isinstance(ident, str) or not ident:
+            continue
+        summary = closeout_summary(cycle, ledger.get('fee_model'), ledger.get('fee_samples'))
+        if not summary or summary['remaining_quantity'] <= 0:
+            continue
+        code = str(cycle.get('code')).zfill(6)
+        if len(code) != 6 or not code.isdigit():
+            continue
+        p = positions.get(code, {})
+        result.append({'code': code, 'name': cycle.get('name') or p.get('name', code),
+                       'cycle_id': ident, 'closeout': summary, 'phase': 'carry_cash',
+                       'status': '尾盘做T收尾：尚有份额未接回',
+                       'reason': f'本轮已卖{summary["sold_quantity"]}、已接回{summary["buyback_quantity"]}、'
+                                 f'尚未接回{summary["remaining_quantity"]}股/份。核对成交后可确认保留现金结束本轮；不为完成做T追买。',
+                       'price': None, 'vwap': None, 'high': None, 'low': None,
+                       'target_buy': None, 'target_sell': None, 'quantity': None,
+                       'remaining_quantity': summary['remaining_quantity'], 'sell_price': cycle.get('sell_price'),
+                       'tradable': False, 'sell_first': True, 'held': (_integer(p.get('quantity')) or 0) > 0,
+                       'blockers': [], 'checks': [],
+                       'note': '仅账本收尾，不依赖行情生成买卖决策；保留现金不等于发生接回成交。'})
+    return result
+
+
+def closeout_signals(cfg, book, *, now, calendar_ok, market_session):
+    """Rebuild quote-independent closeout notices from the current actual ledger."""
+    clock = _clock(now)
+    if not (calendar_ok and market_session and clock.weekday() < 5
+            and time(14, 45) <= clock.time() < time(15)):
+        return []
+    return [_signal(row, clock, row['cycle_id'])
+            for row in _closeout_rows(cfg, book.get('cycles') or [], book, clock)]
 
 
 def _restore_blockers(cfg, risk, base, price, code):
@@ -245,10 +359,17 @@ def build_t_observations(cfg,quotes,risk,minute_by_code,ledger,now=None,market_s
     fee_model=ledger.get('fee_model') or {};fee_samples=ledger.get('fee_samples') or []
     session=bool(market_session and calendar_ok and clock.weekday()<5 and
                  (time(9,30)<=clock.time()<time(11,30) or time(13)<=clock.time()<time(15)))
+    # Closing an actual record is a ledger decision, not a new market trade.
+    # Keep it visible even in exit-only mode or when minute/quote data is absent.
+    closeouts = _closeout_rows(cfg, cycles, ledger, clock) if session and clock.time() >= time(14, 45) else []
+    result['rows'].extend(closeouts)
+    result['signals'].extend(_signal(row, clock, row['cycle_id']) for row in closeouts)
+    closeout_codes = {row['code'] for row in closeouts}
     for position in cfg.get('positions',[]):
         held=_integer(position.get('quantity'));kind=position.get('type','stock')
         if not held or kind not in ('stock','etf'):continue
         code=str(position['code']).zfill(6);quote=quotes.get(code) or {};price=_positive(quote.get('price'))
+        if code in closeout_codes:continue
         row={'code':code,'name':position.get('name',code),'phase':'wait','status':'等待分时条件',
              'reason':'等待偏离均价后的冲高回落或回踩企稳，不因时间到点做T。','blockers':[],
              'price':price,'vwap':None,'high':None,'low':None,'target_buy':None,'target_sell':None,
@@ -291,8 +412,7 @@ def build_t_observations(cfg,quotes,risk,minute_by_code,ledger,now=None,market_s
                 row.update(costs)
                 fee = costs['fee_reserve']
             if clock.time()>=time(14,45):
-                row.update(phase='carry_cash',status='尾盘未接回，不追价',reason='本轮尚未接回可留现金，不为完成做T追买；先核对尾盘可卖数和风险。')
-                result['signals'].append(_signal(row,clock,str(cycle.get('id',''))));continue
+                row.update(phase='blocked',status='T收尾资料待核',reason='实际T成交记录未通过收尾核对，先核对分笔成交，不为完成做T追买。');continue
             if quantity<100:row.update(phase='blocked',status='剩余不足一手',reason='实际未接回数量不足100股/份，不凑整扩大回补');continue
             target = _tick(decimal(sell_price) - decimal(costs['minimum_spread']), kind, ROUND_FLOOR)
             row.update(target_buy=target if target > 0 else None,target_sell=sell_price)
@@ -340,6 +460,7 @@ def build_t_observations(cfg,quotes,risk,minute_by_code,ledger,now=None,market_s
         result['signals'].append(_signal(row,clock))
     positions={str(p['code']).zfill(6):p for p in cfg.get('positions',[])}
     for row in result['rows']:
+        if row.get('closeout'):continue
         _explain(row,positions[row['code']],cfg,risk,quotes.get(row['code']) or {},
                  (minute_by_code or {}).get(row['code']),ledger,clock,session)
     return result

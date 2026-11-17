@@ -104,14 +104,17 @@ def _validated(cfg, *, config_hash, market_time, fetched_at, quotes, risk):
         raise ValueError('持仓报价不完整')
 
     cash = _number(cfg.get('cash', 0))
-    if cash < 0:
-        raise ValueError('现金不能为负')
+    frozen_cash = _number(cfg.get('frozen_cash', 0))
+    if cash < 0 or frozen_cash < 0:
+        raise ValueError('可用现金和冻结资金不能为负')
     equity = _number(risk.get('equity'), positive=True)
-    expected_equity = round(cash + sum(prices[c] * p[1] for c, p in expected.items()), 2)
+    expected_equity = round(cash + frozen_cash + sum(prices[c] * p[1] for c, p in expected.items()), 2)
     if abs(equity - expected_equity) > .011:
-        raise ValueError('总资产与现金和持仓市值不一致')
+        raise ValueError('总资产与可用现金、冻结资金及持仓市值不一致')
+    if frozen_cash and ('frozen_cash' not in risk or abs(_number(risk['frozen_cash']) - frozen_cash) > .011):
+        raise ValueError('快照冻结资金与配置不一致')
     for key in ('used', 'remaining', 'existing_planned_stress', 'available_new_risk',
-                'budget', 'baseline', 'cash', 'exposure', 'change'):
+                'budget', 'baseline', 'cash', 'frozen_cash', 'total_cash', 'exposure', 'change'):
         if risk.get(key) is not None:
             _number(risk[key])
     if risk.get('missing'):

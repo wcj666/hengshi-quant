@@ -4,7 +4,7 @@ from math import isfinite
 from zoneinfo import ZoneInfo
 
 from quote_health import parse_provider_time
-from t_costs import estimate_leg
+from t_costs import cash_impact
 
 CN = ZoneInfo('Asia/Shanghai')
 EXIT_LEVELS = {
@@ -20,7 +20,7 @@ def exit_only(cfg):
 
 
 def allowed_signals(cfg, signals):
-    return [s for s in signals if not exit_only(cfg) or s.get('category') == 'reduce']
+    return [s for s in signals if not exit_only(cfg) or s.get('category') == 'reduce' or s.get('ledger_notice') is True]
 
 
 def number(value):
@@ -111,7 +111,8 @@ def signal_applicable(signal, quote, plans, now):
                 and level <= price <= cap and quote.get('at_limit_up') is not True
                 and quote.get('limit_status_verified') is not False)
     if trigger in ('sell_ready', 'buyback_ready'):
-        if signal.get('tradable') is not True or now.time() >= time(14, 45):
+        if ((signal.get('tradable') is not True and signal.get('validation_status') not in ('pending', 'excluded'))
+                or now.time() >= time(14, 45)):
             return False
         if trigger == 'buyback_ready':
             return level is not None and price <= level
@@ -143,7 +144,7 @@ def t_card(row, cycle, price, mode):
     return result
 
 
-def build_actions(cfg, state, book, *, now=None):
+def build_actions(cfg, state, book, *, now=None, output=None):
     now = (now or datetime.now(CN)).astimezone(CN)
     pause = market_status(state, now)
     valid = pause is None
@@ -167,9 +168,20 @@ def build_actions(cfg, state, book, *, now=None):
     for cycle in book.get('cycles', []):
         if cycle.get('status') == 'open' and cycle.get('unbought_quantity', 0) > 0:
             cycles_by_code.setdefault(str(cycle['code']), []).append(cycle)
-    signals = allowed_signals(cfg, state.get('trade_signals') or []) if valid else []
+    signals = allowed_signals(cfg, [s for s in state.get('trade_signals') or [] if not s.get('ledger_notice')]) if valid else []
     signals = [s for s in signals if (s.get('category') != 't' or s['code'] in t_deadlines)
                and signal_applicable(s, quotes.get(s['code'], {}), plans, now)]
+    if output is not None:
+        from alert_journal import followup_signals
+        from reminder_policy import apply_policy
+        signals = apply_policy(output, cfg, signals, now=now)
+        signals = followup_signals(output, signals, cfg.get('positions', []), book.get('availability') or {},
+                                   cfg.get('reconciled_trades', []), now=now)
+    from t_engine import closeout_signals
+    ledger_signals = closeout_signals(cfg, book, now=now,
+        calendar_ok=state.get('calendar_ok') is True,
+        market_session=(state.get('mode') == 'live' and state.get('market_session') is True
+                        and fresh(state.get('fetch_finished_at'), now, 45)))
     pending = {code for code in watches if (plans.get(code) or {}).get('strategy_version') == '1.0'}
     codes = list(dict.fromkeys([*holdings, *(code for code in watches if code in pending),
                                 *(s['code'] for s in signals if s['category'] == 'add')]))
@@ -244,12 +256,19 @@ def build_actions(cfg, state, book, *, now=None):
             shares = selected.get('shares')
             observation_only = category == 't' and trigger not in ('sell_ready', 'buyback_ready')
             observation_only |= category == 'reduce' and trigger in ('structure_support', 'structure_weakness', 'resistance_test', 'exit_review')
+            observation_only |= selected.get('validation_status') in ('pending', 'excluded') or selected.get('followup_status') == 'waiting_inventory'
             label = ('买入复核' if category == 'add' else '做 T 接回复核' if buy else
                      '结构观察' if observation_only and category == 'reduce' else
                      '做 T 条件观察' if observation_only else '做 T 高抛复核' if category == 't' else '卖出复核')
+            if selected.get('followup'):
+                label = '剩余数量待核' if observation_only else '剩余减仓复核'
+            elif selected.get('validation_status') in ('pending', 'excluded'):
+                label = '待验证观察' if selected['validation_status'] == 'pending' else '已停用强提醒'
             card.update(state='wait' if observation_only else 'buy' if buy else 'reduce',
                         label=label, alert_id=selected.get('id'), reason=selected.get('reason'),
                         side=None if observation_only else 'buy' if buy else 'sell')
+            card.update({key: selected.get(key) for key in ('validation_status', 'validation_reason',
+                        'followup', 'original_target', 'filled_before', 'remaining_target')})
             card['blockers'] = list(dict.fromkeys(card['blockers'] + (selected.get('blockers') or [])))
             if not observation_only and type(shares) is int and shares > 0 and not selected.get('blockers'):
                 if buy:
@@ -266,10 +285,16 @@ def build_actions(cfg, state, book, *, now=None):
             cash = number(cfg.get('cash'))
             if qty and cash is not None:
                 side = card['side']
-                fee, _ = estimate_leg(p.get('type', 'stock'), side, price * qty, book.get('fee_model') or {}, [])
-                fee = max(20., fee or 0.)
-                card.update(fee=round(fee, 2), fee_note='按费率估算，至少预留20元',
-                            cash_after=round(cash + (1 if not buy else -1) * price * qty - fee, 2))
+                import t_runtime
+                impact = cash_impact(p.get('type', 'stock'), side, price * qty,
+                                    t_runtime.settings(cfg, book)['fee_reserve'],
+                                    book.get('fee_model'), book.get('fee_samples') or [])
+                card.update(fee=impact['estimated_fee'], estimated_fee=impact['estimated_fee'],
+                            safety_reserve=impact['safety_reserve'], reserved_cost=impact['reserved_cost'],
+                            fee_note='预计手续费与额外安全预留分别列示；预留仍属于账户资产',
+                            cash_after=round(cash + impact['conservative_cash_delta'], 2),
+                            estimated_cash_after=round(cash + impact['estimated_cash_delta'], 2)
+                                if impact['estimated_cash_delta'] is not None else None)
                 if buy and card['cash_after'] < 0:
                     card.update(quantity=None, cash_after=None, state='paused', label='含费用后现金不足')
                     card['blockers'].append('含费用预留后现金不足')
@@ -284,8 +309,12 @@ def build_actions(cfg, state, book, *, now=None):
         if signal.get('category') == 't':
             deadline = min(deadline, t_deadlines[code], now.replace(hour=14, minute=45, second=0, microsecond=0))
         signal_expiries[signal['id']] = deadline.astimezone(CN).isoformat()
+    for signal in ledger_signals:
+        signal_expiries[signal['id']] = min(parse_provider_time(signal['expires_at']),
+            parse_provider_time(state['fetch_finished_at']) + timedelta(seconds=45)).astimezone(CN).isoformat()
     return {'valid': valid, 'asof': now.isoformat(), 'mode': mode, 'pause_reason': pause,
             'expires_at': expires.isoformat() if expires else None,
-            'cards': cards, 'signals': signals, 'signal_expires_at': signal_expiries,
+            'cards': cards, 'signals': signals + ledger_signals, 'closeouts': ledger_signals,
+            'signal_expires_at': signal_expiries,
             'cash_floor': round(reserve, 2) if reserve is not None else None,
             'note': '各卡现金为单笔估算，不能相加作为组合计划。'}

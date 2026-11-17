@@ -121,6 +121,33 @@ class TRuntimeTests(unittest.TestCase):
         saved=json.loads((self.root/'config.json').read_text());self.assertEqual(saved,self.cfg)
         self.assertEqual(client.get('/api/t-observe',headers=h).json['cycles'][0]['unbought_quantity'],100)
 
+    def test_cash_closeout_confirms_latest_remainder_without_inventing_buyback(self):
+        self.avail();cycle=self.sell()
+        tr.record_buyback(self.out,self.cfg,cycle['id'],{'quantity':40,'price':20,'fee':1,'buy_filled':True},self.now)
+        before=json.dumps(self.cfg,sort_keys=True)
+        with self.assertRaisesRegex(ValueError,'数量已变化'):
+            tr.close_cycle(self.out,self.cfg,cycle['id'],{'leave_cash':True,'remaining_quantity':100},self.now)
+        result=tr.close_cycle(self.out,self.cfg,cycle['id'],{'leave_cash':True,'remaining_quantity':60},self.now)
+        self.assertEqual(result['status'],'cash')
+        self.assertEqual(result['buyback_quantity'],40)
+        self.assertEqual(result['buyback_cost'],800)
+        self.assertEqual(len(result['fills']),1)
+        self.assertEqual(result['closeout_confirmed_quantity'],60)
+        self.assertEqual(result['closure_kind'],'retain_cash')
+        self.assertEqual(result['closeout_snapshot']['remaining_quantity'],60)
+        self.assertEqual(before,json.dumps(self.cfg,sort_keys=True))
+        again=tr.close_cycle(self.out,self.cfg,cycle['id'],{'leave_cash':True,'remaining_quantity':60},self.now)
+        self.assertEqual(again['closed_at'],result['closed_at'])
+
+    def test_disabled_t_still_exposes_actual_endofday_remainder(self):
+        from zoneinfo import ZoneInfo
+        self.now=datetime(2026,11,11,14,50,tzinfo=ZoneInfo('Asia/Shanghai'))
+        self.avail();self.sell();self.cfg['t_settings']['enabled']=False
+        result=tr.observe(self.out,self.cfg,{}, {},now=self.now,market_session=True,calendar_ok=True)
+        self.assertFalse(result['enabled'])
+        self.assertEqual(result['signals'][0]['trigger'],'carry_cash')
+        self.assertEqual(result['signals'][0]['closeout']['remaining_quantity'],100)
+
     def screenshot(self,quantity=200,asof=None):
         row={**self.cfg['positions'][0],'available_quantity':quantity,'screenshot_price':20,'market_value':6000}
         stamp=asof or self.now-timedelta(minutes=10)

@@ -63,7 +63,8 @@ def latest_broker_snapshot(output, cfg):
                 return None
             expected[code] = (kind, quantity, cost)
         cash = _number(cfg['cash'])
-        if cash < 0:
+        frozen = _number(cfg.get('frozen_cash', 0))
+        if cash < 0 or frozen < 0:
             return None
         files = sorted((Path(output) / 'broker_snapshots').glob('broker_*.json'),
                        key=lambda path: path.name, reverse=True)
@@ -80,10 +81,11 @@ def latest_broker_snapshot(output, cfg):
             if asof.tzinfo is None or asof.utcoffset() is None or asof > now:
                 continue
             actual_cash = _number(snapshot['available_cash'])
+            actual_frozen = _number(snapshot.get('frozen_cash', 0))
             market_total = _number(snapshot['total_market_value'])
             assets = _number(snapshot['total_assets'])
-            if (actual_cash < 0 or market_total < 0 or assets <= 0
-                    or abs(actual_cash - cash) > 1e-8):
+            if (actual_cash < 0 or actual_frozen < 0 or market_total < 0 or assets <= 0
+                    or abs(actual_cash - cash) > 1e-8 or abs(actual_frozen - frozen) > 1e-8):
                 continue
             positions = snapshot['positions']
             if not isinstance(positions, list) or len(positions) != len(expected):
@@ -105,7 +107,7 @@ def latest_broker_snapshot(output, cfg):
                 seen.add(code)
                 values.append(value)
             if (seen != set(expected) or abs(math.fsum(values) - market_total) > .011
-                    or abs(market_total + actual_cash - assets) > .011):
+                    or abs(market_total + actual_cash + actual_frozen - assets) > .011):
                 continue
             return snapshot
         except (OSError, KeyError, TypeError, ValueError, AttributeError, OverflowError):

@@ -106,14 +106,29 @@ def held_observation(signal):
         signal.get('category') == 'reduce'
         and signal.get('trigger') in ('structure_support', 'structure_weakness')
         or signal.get('category') == 't' and signal.get('trigger') == 'sell_watch'
+        or signal.get('followup') is True and signal.get('shares') is None
     )
 
 
 def notification_policy(signal):
     """Important held-position observations notify once without becoming orders."""
     side = _alert_side(signal)
+    if signal.get('validation_status') == 'excluded':
+        return {'native': False, 'repeatable': False}
+    if ledger_notice(signal):
+        return {'native': True, 'repeatable': False}
+    if signal.get('validation_status') == 'pending':
+        return {'native': signal.get('held') is True, 'repeatable': False}
+    if signal.get('followup') is True and signal.get('shares') is None:
+        return {'native': True, 'repeatable': False}
     strong = signal.get('priority') == 'high' or bool(side)
     return {'native': bool(strong or held_observation(signal)), 'repeatable': bool(strong)}
+
+
+def ledger_notice(row):
+    return (row.get('ledger_notice') is True and row.get('source_kind') == 'actual_t_ledger'
+            and row.get('trigger') == 'carry_cash' and isinstance(row.get('cycle_id'), str)
+            and bool(row['cycle_id']) and _quantity((row.get('closeout') or {}).get('remaining_quantity')) is not None)
 
 
 def capture_rows(events, signals, quotes, plans, *, now, source, config_hash):
@@ -126,7 +141,7 @@ def capture_rows(events, signals, quotes, plans, *, now, source, config_hash):
     for event in signals:
         code, trigger = event['code'], event['trigger']
         quote_at = _quote_time(quotes.get(code, {}), now)
-        if code != 'PORT' and not quote_at:
+        if code != 'PORT' and not quote_at and not ledger_notice(event):
             continue
         side = _alert_side(event)
         row = {
@@ -139,6 +154,11 @@ def capture_rows(events, signals, quotes, plans, *, now, source, config_hash):
             'entry_cap': _number(plans.get(code, {}).get('entry_price')) if trigger == 'v1_entry' else None,
             **notification_policy(event),
         }
+        for key in ('followup', 'root_alert_id', 'parent_alert_id', 'remaining_target',
+                    'original_target', 'filled_before', 'followup_status', 'ledger_notice', 'source_kind',
+                    'cycle_id', 'closeout', 'expires_at', 'validation_status', 'validation_reason', 'validation_base_id'):
+            if key in event:
+                row[key] = event[key]
         result.append(row)
         seen_triggers.add((code, row['kind'] if code == 'PORT' else trigger))
     for event in events:
@@ -172,6 +192,8 @@ def _currently_active(row, now):
             or last.astimezone(CN).date() != now.date()
             or not 0 <= (now - last).total_seconds() <= 90):
         return False
+    if ledger_notice(row):
+        return time(14, 45) <= now.time() < time(15)
     return row.get('code') == 'PORT' or bool(_quote_time(
         {'source_timestamp': row.get('latest_quote_at') or row.get('quote_at')}, now))
 
@@ -256,7 +278,7 @@ def persist_cycle(output, rows, *, now, notify=False, send=None, clock=None, tra
         if attempt_at.date().isoformat() != day or not _can_notify(attempt_at):
             break
         current = current_by_id[ident]
-        if current['code'] != 'PORT' and not _quote_time({'source_timestamp': current['quote_at']}, attempt_at):
+        if current['code'] != 'PORT' and not ledger_notice(current) and not _quote_time({'source_timestamp': current['quote_at']}, attempt_at):
             continue
         with _locked(folder):
             journal = _day_rows(folder, day)
@@ -327,6 +349,101 @@ def _linked_fills(row, trades):
     return list(fills.values())
 
 
+def _family_fills(journal, root, trades, *, now=None):
+    """Count one real fill once across the original and every follow-up row."""
+    members = {ident: row for ident, row in journal.items()
+               if ident == root['id'] or row.get('root_alert_id') == root['id']}
+    found = {}
+    for fill in trades:
+        if not isinstance(fill, dict):
+            continue
+        row = members.get(fill.get('alert_id'))
+        if not row or not _matches_fill(row, fill):
+            continue
+        stamp = parse_provider_time(fill.get('executed_at'))
+        if now is not None and stamp > now:
+            continue
+        ident = fill.get('fill_id') or fill.get('id')
+        if isinstance(ident, str) and ident:
+            found.setdefault(ident, fill)
+    return list(found.values())
+
+
+def followup_signals(output, signals, positions, availability, trades=(), *, now=None):
+    """Rebuild only the unfilled part of an existing sell-review target.
+
+    Call after live price/condition checks and before capture_rows, and again
+    when the action center consumes a snapshot. This function is read-only.
+    IDs depend on confirmed fill identities and readiness, not polling time.
+    A refreshed, same-day broker inventory confirmation is required after the
+    most recent fill before any executable quantity can be shown.
+    """
+    now = _clock(now)
+    if not signals or not _can_notify(now):
+        return list(signals)
+    journal = _day_rows(journal_dir(output), str(now.date()))
+    holdings = {str(p.get('code', '')).zfill(6): p for p in positions
+                if isinstance(p, dict) and _quantity(p.get('quantity'))}
+    result = []
+    for signal in signals:
+        root_id = signal.get('root_alert_id') or signal['id']
+        root = journal.get(root_id)
+        target = _quantity((root or {}).get('quantity'))
+        if (signal.get('category') != 'reduce' or not root or root.get('side') != 'sell'
+                or root.get('category') != 'reduce' or not target
+                or root.get('code') != signal.get('code') or root.get('trigger') != signal.get('trigger')):
+            result.append(signal)
+            continue
+        fills = _family_fills(journal, root, trades, now=now)
+        filled = sum(fill['quantity'] for fill in fills)
+        if not filled:
+            result.append(signal)
+            continue
+        remaining = max(0, target - filled)
+        position = holdings.get(str(signal['code']).zfill(6))
+        if not remaining or not position:
+            continue
+        latest = max(parse_provider_time(fill['executed_at']) for fill in fills)
+        inventory = availability.get(signal['code']) or {}
+        available = inventory.get('available_quantity')
+        confirmed = parse_provider_time(inventory.get('confirmed_at'))
+        checked = (inventory.get('date') == str(now.date())
+                   and inventory.get('base_quantity') == position['quantity']
+                   and type(available) is int and 0 <= available <= position['quantity']
+                   and confirmed is not None and latest <= confirmed <= now)
+        blockers = list(signal.get('followup_base_blockers', signal.get('blockers') or []))
+        quantity = None
+        if not checked:
+            blockers.append('部分成交后，剩余持仓及当日可卖数量待重新核对')
+        elif available == 0:
+            blockers.append('券商确认剩余可卖数量为0，等待新的可卖核验')
+        elif not blockers:
+            quantity = min(remaining, position['quantity'], available)
+            if quantity != position['quantity']:
+                quantity = quantity // 100 * 100
+            if not quantity:
+                quantity = None
+                blockers.append('剩余目标不足一手且不是全部持仓，待人工复核')
+        ready = quantity is not None
+        # A later inventory confirmation can promote an observation to a new
+        # executable review without resetting every repeated poll's identity.
+        identity = '|'.join(sorted(str(f.get('fill_id') or f.get('id')) for f in fills))
+        ident = sha256(f'followup|{root_id}|{identity}|{ready}'.encode()).hexdigest()[:20]
+        parent = max(fills, key=lambda f: parse_provider_time(f['executed_at']))['alert_id']
+        base_reason = signal.get('followup_base_reason', signal.get('reason') or '')
+        explanation = (f'原计划{target}股/份，已对账成交{filled}，剩余目标{remaining}；'
+                       + (f'本轮按最新可卖量最多复核{quantity}股/份。' if ready else '剩余数量待核验，当前不提供下单数量。'))
+        result.append({**signal, 'id': ident, 'shares': quantity, 'held': True,
+                       'title': '剩余减仓复核', 'reason': explanation + base_reason,
+                       'blockers': list(dict.fromkeys(blockers)), 'followup': True,
+                       'root_alert_id': root_id, 'parent_alert_id': parent,
+                       'original_target': target, 'filled_before': filled, 'remaining_target': remaining,
+                       'followup_status': 'ready' if ready else 'waiting_inventory',
+                       'followup_base_reason': base_reason,
+                       'followup_base_blockers': list(signal.get('followup_base_blockers', signal.get('blockers') or []))})
+    return result
+
+
 def validate_fill_link(output, fill, trades=()):
     """Check one matching same-day historical alert and return its reference level."""
     ident = fill.get('alert_id')
@@ -338,7 +455,8 @@ def validate_fill_link(output, fill, trades=()):
     if not stamp:
         raise ValueError('关联提醒须记录带时区的实际成交时间')
     day = stamp.astimezone(CN).date().isoformat()
-    row = _day_rows(journal_dir(output), day).get(ident)
+    journal = _day_rows(journal_dir(output), day)
+    row = journal.get(ident)
     if not row:
         raise ValueError('成交日没有这条提醒')
     if not _matches_fill(row, fill):
@@ -346,6 +464,11 @@ def validate_fill_link(output, fill, trades=()):
     total = fill['quantity'] + sum(item['quantity'] for item in _linked_fills(row, trades))
     if row['quantity'] is not None and total > row['quantity']:
         raise ValueError('累计关联数量超过提醒数量，可另行登记余下成交')
+    root = journal.get(row.get('root_alert_id') or ident)
+    if root and root.get('category') == 'reduce' and root.get('side') == 'sell' and _quantity(root.get('quantity')):
+        family_total = fill['quantity'] + sum(item['quantity'] for item in _family_fills(journal, root, trades))
+        if family_total > root['quantity']:
+            raise ValueError('累计关联数量超过原减仓目标，请另行核验交易计划')
     level = _number(row['level'])
     return level if level and level > 0 else _number(row['price'])
 

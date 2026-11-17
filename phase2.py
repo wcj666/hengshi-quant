@@ -263,7 +263,7 @@ def alert_rules(cfg,prices,universe, verified, mode):
     valuation_cfg={**cfg,'positions':[p for p in cfg.get('positions',[]) if int(p.get('quantity',0))>0]} if strategy_enabled(cfg) else cfg
     if strategy_enabled(cfg) and not valuation_cfg['positions']:
         p_df=pd.DataFrame(columns=['代码','当前快照价','当前市值','浮动盈亏估算','当日参考盈亏估算'])
-        missing=[];equity=float(cfg.get('cash',0));loss=float(cfg['baseline_equity'])-equity;remain=None
+        missing=[];equity=float(cfg.get('cash',0))+float(cfg.get('frozen_cash',0));loss=float(cfg['baseline_equity'])-equity;remain=None
     else:p_df,missing,equity,loss,remain=portfolio(valuation_cfg,prices,mode)
     if not p_df.empty:
         keys={code_str(x['code']):x for x in cfg.get('positions',[])}

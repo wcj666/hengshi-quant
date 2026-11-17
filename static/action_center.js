@@ -123,14 +123,17 @@ function renderCard(card, open) {
     '</p><dl>' + metric(card.side === 'sell' ? '卖出参考价' : '最新参考价', price(card.price)) +
     metric('本次核验上限', quantity(card.quantity)) +
     (card.available_quantity == null ? '' : metric('券商记录可卖', quantity(card.available_quantity))) +
-    (card.cash_after == null ? '' : metric('本笔后现金估算', amount(card.cash_after))) +
+    (card.estimated_cash_after == null ? '' : metric('扣预计费用后现金', amount(card.estimated_cash_after))) +
+    (card.cash_after == null ? '' : metric('预留后保守可用现金', amount(card.cash_after))) +
     '</dl>' + (thresholds.length ? '<ul class="action-thresholds">' + thresholds.map(renderThreshold).join('') + '</ul>' : '') +
     list(card.blockers || []) + (context ? '<p>' + esc(context) + '</p>' : '') +
     (card.notification ? '<p class="action-notice">' + esc(card.notification) + '</p>' : '') +
+    (card.validation_status ? '<p class="action-notice">' + esc(({pending:'待验证观察',excluded:'已停用强提醒',verified:'本次分段验证通过',risk:'保留风险提醒'})[card.validation_status]) + '：' + esc(card.validation_reason) + '</p>' : '') +
+    (card.followup ? '<p class="action-notice">原目标 ' + esc(card.original_target) + '，已成交 ' + esc(card.filled_before) + '，剩余目标 ' + esc(card.remaining_target) + ' 股/份。每次执行前重新核对可卖数量。</p>' : '') +
     renderT(card.t) + '<details data-card-code="' + esc(card.code) + '"' + (open ? ' open' : '') +
     '><summary>有效期、失效条件与费用</summary>' +
     (card.plan?.signal_date ? '<p>计划信号日 ' + esc(card.plan.signal_date) + '。</p>' : '') +
-    (card.fee != null ? '<p>费用预留 ' + amount(card.fee) + ' · ' + esc(card.fee_note) + '</p>' : '') +
+    (card.reserved_cost != null ? '<p>预计手续费 ' + amount(card.estimated_fee) + ' · 额外安全预留 ' + amount(card.safety_reserve) + '。' + esc(card.fee_note) + '</p>' : '') +
     list(card.cancel || []) + (card.inventory_at ? '<p>券商数量记录于 ' + esc(card.inventory_at) + '</p>' : '') +
     '</details>' + (card.alert_id && card.quantity != null ? '<a href="/trade-reconcile?alert_id=' + encodeURIComponent(card.alert_id) +
       '">登记实际成交</a>' : '') + '</article>';
@@ -142,7 +145,7 @@ function drawCards(data) {
     (data.mode === 'exit_only' ? ' · 退出休息模式' : '');
   node('action-note').textContent = (data.cash_floor == null ? '' :
     '总仓规则对应现金至少 ' + amount(data.cash_floor) + '。') + data.note;
-  node('action-validation').textContent = data.validation_note;
+  node('action-validation').textContent = [data.validation_note, data.validation_policy?.reason].filter(Boolean).join('。');
   node('action-desktop-status').textContent = [data.desktop_status, desktopTest].filter(Boolean).join('。');
   if (!loadedPrefs && !preferencesDirty) {
     node('execution-mode').value = data.preferences.mode;
@@ -155,25 +158,32 @@ function drawCards(data) {
 }
 
 function alertMarkup(alert) {
+  const c = alert.closeout;
+  const closeout = alert.ledger_notice && c ? '<dl class="action-closeout">' +
+    metric('已卖出', quantity(c.sold_quantity)) + metric('已接回', quantity(c.buyback_quantity)) +
+    metric('未接回', quantity(c.remaining_quantity)) + metric(c.cash_basis === 'actual' ? '本轮实际净现金流' : '本轮净现金流估算',
+      amount(c.net_cash_actual ?? c.net_cash_estimate)) + '</dl><p>' + esc(c.cash_note) + '</p><p>' + esc(c.fee_note) + '</p>' : '';
   return '<article class="strong-alert ' + (alert.side === 'sell' ? 'sell' : alert.side === 'buy' ? 'buy' : 'risk') +
     '" data-alert-id="' + esc(alert.id) + '"><div><strong>' + esc(alert.name) + ' · ' + esc(alert.kind) + '</strong><p>' + esc(alert.reason) +
-    '</p><span>' + (alert.side ? '参考价 ' + price(alert.price) + ' · 核验数量 ' + quantity(alert.quantity) :
+    '</p>' + closeout + '<span>' + (alert.ledger_notice ? '实际成交账本收尾；本条不依赖行情，不提供买卖指令' : alert.side ? '参考价 ' + price(alert.price) + ' · 核验数量 ' + quantity(alert.quantity) :
       '条件观察，请在行动卡核对条件；当前不提供下单数量') +
     '</span></div><div class="action-buttons"><button data-id="' + esc(alert.id) + '" data-day="' + esc(alert.day) +
     '" data-feedback="seen">已看到</button><button data-id="' + esc(alert.id) + '" data-day="' + esc(alert.day) +
-    '" data-feedback="deferred">暂不执行</button>' + (alert.side ?
+    '" data-feedback="deferred">暂不执行</button>' + (alert.ledger_notice && c ?
+      '<button data-close-cycle="' + esc(alert.cycle_id) + '" data-remaining="' + esc(c.remaining_quantity) + '">确认保留现金结束本轮</button>' : '') + (alert.side ?
       '<a href="/trade-reconcile?alert_id=' + encodeURIComponent(alert.id) + '">登记成交</a>' : '') + '</div></article>';
 }
 
 function drawAlerts(data, allowSound = true) {
   const now = Date.now();
   const globalFresh = data.deadline == null || (Number.isFinite(data.deadline) && data.deadline > now);
-  const active = data.valid && globalFresh ? (data.alerts || []).filter(alert =>
+  const active = (data.alerts || []).filter(alert =>
+    (alert.ledger_notice || data.valid && globalFresh) &&
     Number.isFinite(alert.deadline ?? data.deadline) && (alert.deadline ?? data.deadline) > now &&
-    !(data.cards || []).some(card => card.code === alert.code &&
-      (card.state === 'paused' || (card.deadline != null && card.deadline <= now))) &&
+    (alert.ledger_notice || !(data.cards || []).some(card => card.code === alert.code &&
+      (card.state === 'paused' || (card.deadline != null && card.deadline <= now)))) &&
     !['seen','deferred'].includes(alert.feedback?.action) &&
-    !['seen','deferred','partial'].includes(alert.status) && alert.native) : [];
+    !['seen','deferred','partial'].includes(alert.status) && alert.native);
   if (node('strong-alerts')) node('strong-alerts').innerHTML = active.map(alertMarkup).join('');
   const bottom = node('action-bottom-alert');
   if (bottom) {
@@ -197,11 +207,18 @@ function drawAlerts(data, allowSound = true) {
 
 function expire(data, now) {
   const elapsed = at => at != null && at <= now;
-  if (elapsed(data.deadline)) {
-    resetAlerts('行情、持仓或交易时段核验已过期，等待刷新。');
-    return false;
-  }
   let changed = false;
+  if (elapsed(data.deadline)) {
+    if (!(data.alerts || []).some(a => a.ledger_notice && !elapsed(a.deadline))) {
+      resetAlerts('行情、持仓或交易时段核验已过期，等待刷新。');
+      return false;
+    }
+    data.valid = false;
+    data.alerts = data.alerts.filter(a => a.ledger_notice);
+    for (const card of data.cards) card.deadline = now;
+    data.deadline = null;
+    changed = true;
+  }
   for (const card of data.cards) {
     const cardExpired = elapsed(card.deadline);
     if (cardExpired) {
@@ -274,6 +291,21 @@ async function review() {
 }
 
 async function feedback(event) {
+  const close = event.target.closest('[data-close-cycle]');
+  if (close) {
+    close.disabled = true;
+    generation++;
+    try {
+      await actionApi('/api/t-cycles/' + encodeURIComponent(close.dataset.closeCycle) + '/close', 'POST',
+        {leave_cash:true, remaining_quantity:Number(close.dataset.remaining)});
+      resetAlerts('本轮已确认保留现金，等待刷新账本。');
+      await refresh();
+    } catch (error) {
+      if (typeof showToast === 'function') showToast(error.message, true);
+      else if (node('action-bottom-status')) node('action-bottom-status').textContent = error.message;
+    } finally { close.disabled = false; }
+    return;
+  }
   const button = event.target.closest('[data-feedback]');
   if (!button) return;
   // Do not let an older, in-flight refresh restore a reminder after feedback.

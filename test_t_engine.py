@@ -3,7 +3,7 @@ from copy import deepcopy
 from datetime import datetime,timedelta
 from zoneinfo import ZoneInfo
 import unittest
-from t_engine import build_t_observations
+from t_engine import build_t_observations, closeout_summary
 from t_costs import estimate_leg, roundtrip
 
 class TEngineTests(unittest.TestCase):
@@ -165,5 +165,72 @@ class TEngineTests(unittest.TestCase):
         self.assertIsNone(row['target_sell'])
         self.assertNotIn('break_even_buy_price',row)
         self.assertTrue(any(c['label']=='完整行情与分时' and not c['passed'] for c in row['checks']))
+
+    def closeout_fixture(self, **updates):
+        cycle={'id':'actual-closeout','code':self.code,'name':'底仓','kind':'stock',
+               'date':str(self.now.date()),'status':'open','quantity':100,'buyback_quantity':40,
+               'sell_price':21.,'buyback_cost':800.,'base_quantity':300,'sell_fee':5.,
+               'fee_reserve':20.,'fills':[{'quantity':40,'price':20.,'fee':1.}]}
+        cycle.update(updates)
+        return cycle
+
+    def test_closeout_uses_recorded_cash_and_keeps_unmatched_principal_separate(self):
+        summary=closeout_summary(self.closeout_fixture())
+        self.assertEqual((summary['sold_quantity'],summary['buyback_quantity'],summary['remaining_quantity']),(100,40,60))
+        self.assertEqual(summary['gross_cash_flow'],1300)
+        self.assertEqual(summary['net_cash_actual'],1294)
+        self.assertEqual(summary['cash_basis'],'actual')
+        self.assertIsNone(summary['net_cash_estimate'])
+        self.assertIn('不是全部已实现',summary['cash_note'])
+
+    def test_closeout_missing_fee_or_uncovered_fill_never_claims_actual_net_cash(self):
+        missing_fee=closeout_summary(self.closeout_fixture(sell_fee=None))
+        self.assertIsNone(missing_fee['net_cash_actual'])
+        self.assertEqual(missing_fee['cash_basis'],'pending')
+        self.assertIsNone(missing_fee['net_cash_estimate'])
+        self.assertIsNone(missing_fee['estimated_fee'])
+        self.assertEqual(missing_fee['conservative_cash_delta'],1279)
+        missing_legs=closeout_summary(self.closeout_fixture(fills=[]))
+        self.assertEqual(missing_legs['cash_basis'],'pending')
+        self.assertIsNone(missing_legs['net_cash_estimate'])
+        self.assertIsNone(missing_legs['net_cash_actual'])
+
+    def test_closeout_is_independent_of_quotes_minutes_risk_and_exit_mode(self):
+        late=self.now.replace(hour=14,minute=45)
+        cfg=deepcopy(self.cfg);cfg['execution_preferences']={'mode':'exit_only'}
+        book={'cycles':[self.closeout_fixture()], 'availability':{}}
+        result=self.call(cfg=cfg,ledger=book,quotes={},minutes={},risk={'valid':False},now=late)
+        row=result['rows'][0];signal=result['signals'][0]
+        self.assertEqual(row['phase'],'carry_cash')
+        self.assertIsNone(row['quantity']);self.assertIsNone(row['target_buy'])
+        self.assertIsNone(signal['price']);self.assertIsNone(signal['shares'])
+        self.assertTrue(signal['ledger_notice']);self.assertFalse(signal['tradable'])
+        self.assertEqual(signal['cycle_id'],'actual-closeout')
+        self.assertEqual(signal['expires_at'],late.replace(hour=15,minute=0).isoformat())
+        self.assertEqual(signal['id'],self.call(cfg=cfg,ledger=book,quotes={},minutes={},risk={},now=late)['signals'][0]['id'])
+
+    def test_closeout_exact_session_boundaries_and_finished_cycles(self):
+        book={'cycles':[self.closeout_fixture()]}
+        for clock, calendar_ok, expected in [(self.now.replace(hour=14,minute=44),True,False),
+                                             (self.now.replace(hour=14,minute=45),True,True),
+                                             (self.now.replace(hour=14,minute=59),True,True),
+                                             (self.now.replace(hour=15,minute=0),True,False),
+                                             (self.now.replace(hour=14,minute=45),False,False)]:
+            with self.subTest(clock=clock,calendar=calendar_ok):
+                result=self.call(ledger=book,quotes={},minutes={},now=clock,calendar_ok=calendar_ok)
+                self.assertEqual(bool(result['signals']),expected)
+        for updates in [{'status':'cash'},{'status':'closed'},{'buyback_quantity':100,'buyback_cost':2000},
+                        {'date':'2026-11-10'},{'quantity':True},{'buyback_quantity':101}]:
+            result=self.call(ledger={'cycles':[self.closeout_fixture(**updates)]},quotes={},minutes={},now=self.now.replace(hour=14,minute=50))
+            self.assertEqual(result['signals'],[],updates)
+
+    def test_closeout_handles_each_actual_cycle_even_without_a_remaining_position(self):
+        cfg=deepcopy(self.cfg);cfg['positions']=[]
+        cycles=[self.closeout_fixture(),self.closeout_fixture(id='actual-second',quantity=200,buyback_quantity=0,buyback_cost=0,fills=[])]
+        result=self.call(cfg=cfg,ledger={'cycles':cycles},quotes={},minutes={},now=self.now.replace(hour=14,minute=50))
+        self.assertEqual(len(result['signals']),2)
+        self.assertEqual(len({signal['id'] for signal in result['signals']}),2)
+        self.assertEqual({row['closeout']['remaining_quantity'] for row in result['rows']},{60,200})
+        self.assertTrue(all(not signal['held'] for signal in result['signals']))
 
 if __name__=='__main__':unittest.main()

@@ -5,6 +5,20 @@ from trade_levels import make_levels
 from pnl_engine import calculate as calculate_pnl
 
 
+def cash_balances(cfg):
+    """Frozen funds remain assets but cannot finance a new purchase."""
+    values = []
+    for key in ('cash', 'frozen_cash'):
+        raw = cfg.get(key, 0)
+        if isinstance(raw, bool):
+            raise ValueError('账户可用或冻结资金无效')
+        value = float(raw)
+        if not math.isfinite(value) or value < 0:
+            raise ValueError('账户可用或冻结资金无效')
+        values.append(value)
+    return tuple(values)
+
+
 def risk_prefs(cfg):
     v=cfg.get('risk_settings',{})
     return {
@@ -35,7 +49,7 @@ def _compute_legacy(cfg, quotes:dict[str,float]|None,fresh=False,watch_quotes=No
     settings=risk_prefs(cfg)
     base=float(cfg['baseline_equity'])
     cap=float(cfg['max_additional_loss'])
-    cash=float(cfg.get('cash',0))
+    cash,frozen_cash=cash_balances(cfg)
     rows=[];missing=[];breaches=[];stress=0.;exposed=0.
     quotes=quotes or {}
     for p in cfg.get('positions',[]):
@@ -65,7 +79,7 @@ def _compute_legacy(cfg, quotes:dict[str,float]|None,fresh=False,watch_quotes=No
             'planned_stop_pct':settings['stop_'+p['type']],
             'planned_stress':round(planned_loss,2) if planned_loss is not None else None})
     valid=bool(fresh and not missing)
-    equity=round(cash+exposed,2) if valid else None
+    equity=round(cash+frozen_cash+exposed,2) if valid else None
     used=max(0.,base-equity) if valid else None
     remaining=cap-used if valid else None
     # A triggered stop is an urgent review condition, never considered 'risk free'.
@@ -82,7 +96,8 @@ def _compute_legacy(cfg, quotes:dict[str,float]|None,fresh=False,watch_quotes=No
         'remaining':round(remaining,2) if valid else None,
         'existing_planned_stress':round(stress,2) if valid else None,
         'available_new_risk':round(available,2) if available is not None else None,
-        'cash':cash,'exposure':round(exposed,2) if valid else None,
+        'cash':cash,'frozen_cash':frozen_cash,'total_cash':round(cash+frozen_cash,2),
+        'exposure':round(exposed,2) if valid else None,
         'missing':missing,'stop_breaches':breaches,
         'over_budget':bool(valid and (used>=cap or stress>remaining or breaches)),
         'positions':rows,'settings':settings,'sizing':[], 'pnl':pnl,

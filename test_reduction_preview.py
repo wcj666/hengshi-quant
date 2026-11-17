@@ -8,6 +8,7 @@ import unittest
 from action_center import CN
 from portfolio_test_fixture import account_fixture
 from reduction_preview import build_reduction_preview
+from t_costs import cash_impact
 from trade_reconciliation import position_signature
 from web_dashboard import CSRF, create_app
 
@@ -44,17 +45,65 @@ class ReductionPreviewTests(unittest.TestCase):
         result = self.build({'159971': 300, '588170': 600})
         actual = result['preview']
         self.assertTrue(actual['valid'])
-        self.assertEqual(actual['fees'], 40)
+        self.assertIsNone(actual['fees'])
+        self.assertEqual(actual['reserved_cost'], 40)
         self.assertEqual(actual['net_proceeds'], 2360)
         self.assertEqual(actual['cash_after'], 2860)
         self.assertEqual(actual['market_value_after'], 7600)
-        self.assertEqual(actual['equity_after'], 10460)
+        self.assertIsNone(actual['equity_after'])
+        self.assertEqual(actual['conservative_equity_after'], 10460)
         self.assertEqual(actual['exposure_after_pct'], 72.66)
         self.assertEqual(actual['cash_shortfall'], 1324)
         self.assertEqual(actual['rows'][1]['remaining_quantity'], 1400)
         self.assertEqual(actual['rows'][1]['remaining_weight_pct'], 40.15)
         self.assertEqual(actual['unverified'], [])
         self.assertEqual(self.cfg, before)
+
+    def test_known_fee_and_extra_reserve_are_separate_from_estimated_equity(self):
+        self.book['fee_model'] = {'etf': {'commission_per_10k': 5, 'minimum_commission': 5}}
+        result = self.build({'159971': 300, '588170': 600})['preview']
+        self.assertEqual(result['estimated_fees'], 10)
+        self.assertEqual(result['safety_reserve'], 30)
+        self.assertEqual(result['reserved_cost'], 40)
+        self.assertEqual(result['estimated_net_proceeds'], 2390)
+        self.assertEqual(result['estimated_cash_after'], 2890)
+        self.assertEqual(result['estimated_equity_after'], 10490)
+        self.assertEqual(result['equity_after'], 10490)
+        self.assertEqual(result['conservative_equity_after'], 10460)
+        self.assertEqual(result['exposure_after_pct'], 72.45)
+        self.assertEqual(result['cash_after'], 2860)
+        self.assertEqual(result['rows'][0]['estimated_fee'], 5)
+        self.assertEqual(result['rows'][0]['safety_reserve'], 15)
+
+    def test_unknown_terms_do_not_turn_reserve_into_known_charges(self):
+        result = self.build({'159971': 300})['preview']
+        self.assertIsNone(result['estimated_fees'])
+        self.assertIsNone(result['estimated_cash_after'])
+        self.assertIsNone(result['estimated_equity_after'])
+        self.assertEqual(result['safety_reserve'], 20)
+        self.assertEqual(result['cash_after'], 1080)
+        self.assertEqual(result['rows'][0]['fee_basis'], 'reserve')
+
+    def test_shared_cash_helper_handles_terms_samples_and_zero_trade(self):
+        model = {'etf': {'commission_per_10k': 5, 'minimum_commission': 5}}
+        sell = cash_impact('etf', 'sell', 1000, 20, model)
+        self.assertEqual(sell['estimated_fee'], 5)
+        self.assertEqual(sell['safety_reserve'], 15)
+        self.assertEqual(sell['estimated_cash_delta'], 995)
+        self.assertEqual(sell['conservative_cash_delta'], 980)
+        actual = [{'kind': 'etf', 'side': 'sell', 'notional': 1000, 'fee': 30}]
+        cost = cash_impact('etf', 'sell', 1000, 20, model, actual)
+        self.assertEqual(cost['estimated_fee'], 30)
+        self.assertEqual(cost['fee_basis'], 'comparable_fills')
+        self.assertEqual(cost['safety_reserve'], 0)
+        self.assertEqual(cost['conservative_cash_delta'], 970)
+        self.assertEqual(cash_impact('etf', 'buy', 1000, 20, model)['conservative_cash_delta'], -1020)
+        self.assertEqual(cash_impact('stock', 'sell', 1000, 20,
+                         {'stock': {'commission_per_10k': 5, 'minimum_commission': 5}})['estimated_fee'], 5.51)
+        self.assertEqual(cash_impact('etf', 'sell', 0, 20)['reserved_cost'], 0)
+        for amount in (-1, float('nan'), True):
+            with self.assertRaises(ValueError):
+                cash_impact('etf', 'sell', amount, 20)
 
     def test_yesterday_and_insufficient_inventory_are_hypothetical(self):
         self.book['availability']['159971'].update(date='2026-11-16')
