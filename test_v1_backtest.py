@@ -59,6 +59,57 @@ class ReplayTests(TestCase):
         self.assertEqual([f['side'] for f in result['fills']], ['buy'])
         self.assertTrue(result['open_positions'][0]['stop_pending'])
         self.assertTrue({'t_plus_one', 'exit_price_limit'}.issubset(d['reason'] for d in result['decisions']))
+        stops = [item for item in result['reminders'] if item['kind'] == 'stop_loss']
+        self.assertEqual(len(stops), 1)
+        self.assertEqual(stops[0]['date'], START)
+        self.assertEqual(stops[0]['at'], START + 'T10:00:00+08:00')
+        self.assertFalse(stops[0]['filled'])
+        self.assertEqual(set(stops[0]['blocked_reasons']), {'t_plus_one', 'exit_price_limit'})
+
+    def test_known_trigger_before_missing_execution_bar_counts_without_fill(self):
+        bundle = demo_bundle()
+        bars = session(bundle, START)['minutes']
+        bars.pop(next(index for index, bar in enumerate(bars) if bar['time'] == '09:46'))
+        result = run_backtest(bundle, START, START)
+        self.assertFalse(result['summary']['execution_coverage_complete'])
+        self.assertEqual(result['fills'], [])
+        entry, = result['reminders']
+        self.assertEqual(entry['kind'], 'breakout')
+        self.assertEqual(entry['at'], START + 'T09:45:00+08:00')
+        self.assertFalse(entry['filled'])
+        self.assertIn('minute_gap', entry['blocked_reasons'])
+
+    def test_split_execution_does_not_inflate_the_stop_or_target_count(self):
+        bundle = demo_bundle()
+        for bar in session(bundle, END)['minutes']:
+            bar['volume'] = 1000
+        result = run_backtest(bundle, START, END)
+        target, = [item for item in result['reminders'] if item['kind'] == 'take_profit_2']
+        self.assertEqual(target['target_quantity'], 200)
+        self.assertTrue(target['filled'])
+        self.assertEqual(target['filled_quantity'], 200)
+        self.assertEqual(target['fill_count'], 2)
+
+    def test_profit_ablations_leave_entry_sizing_and_mandatory_stop_intact(self):
+        bundle = demo_bundle()
+        full = run_backtest(bundle, START, END)
+        first_off = run_backtest(bundle, START, END, disabled_profit_targets=('take_profit_1',))
+        second_off = run_backtest(bundle, START, END, disabled_profit_targets=('take_profit_2',))
+        self.assertEqual(first_off['meta']['disabled_profit_targets'], ['take_profit_1'])
+        self.assertEqual(first_off['fills'][0], full['fills'][0])
+        self.assertEqual(second_off['fills'][0], full['fills'][0])
+        self.assertEqual([f['reason'] for f in first_off['fills']], ['breakout', 'take_profit_2'])
+        self.assertEqual([f['reason'] for f in second_off['fills']], ['breakout', 'take_profit_1'])
+        self.assertEqual(first_off['fills'][-1]['quantity'], full['fills'][0]['quantity'])
+        self.assertEqual(second_off['open_positions'][0]['stop_loss'], full['fills'][0]['price'])
+        both_off = ('take_profit_1', 'take_profit_2')
+        no_exits = run_backtest(bundle, START, SECOND, disabled_profit_targets=both_off)
+        original_stop = full['fills'][0]['stop_loss']
+        self.assertEqual(no_exits['open_positions'][0]['stop_loss'], original_stop)
+        row = next(bar for bar in session(bundle, SECOND)['minutes'] if bar['time'] == '09:45')
+        row['low'] = original_stop
+        stopped = run_backtest(bundle, START, SECOND, disabled_profit_targets=both_off)
+        self.assertEqual([f['reason'] for f in stopped['fills']], ['breakout', 'stop_loss'])
 
     def test_future_review_cannot_authorize_earlier_entry(self):
         bundle = demo_bundle()

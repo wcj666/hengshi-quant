@@ -79,7 +79,7 @@ def period_warnings(report):
     return warnings
 
 
-def evaluate(bundle, windows, initial_cash=100000.0, *, bundle_sha256=None):
+def evaluate(bundle, windows, initial_cash=100000.0, *, bundle_sha256=None, baseline_code=None):
     """Replay disjoint windows with unchanged rules, each starting from cash."""
     validate_bundle(bundle)
     checked, gaps = check_windows(windows, bundle["calendar"])
@@ -118,7 +118,7 @@ def evaluate(bundle, windows, initial_cash=100000.0, *, bundle_sha256=None):
         warnings.append("数据包带整体指纹，各输入文件的单独指纹缺失。")
     if sum(period["summary"]["closed_trade_count"] for period in periods) < 100:
         warnings.append("三段合计不足 100 笔已结束交易。稳定性还需结合更大样本及不同市场环境评估。")
-    return {
+    result = {
         "meta": {
             "demo": demo, "source": bundle["source"], "calendar_source": bundle["calendar_source"],
             "universe_source": bundle.get("universe_source"), "input_digests": bundle.get("input_digests", {}),
@@ -126,6 +126,11 @@ def evaluate(bundle, windows, initial_cash=100000.0, *, bundle_sha256=None):
         },
         "periods": periods, "reports": reports,
     }
+
+    from reminder_validation import evaluate_reminders
+
+    result["reminder_validation"] = evaluate_reminders(bundle, result, baseline_code=baseline_code)
+    return result
 
 
 def save_comparison(result, output_dir):
@@ -139,6 +144,11 @@ def save_comparison(result, output_dir):
         run.mkdir()
         for key in PERIOD_KEYS:
             save_report(result["reports"][key], run / key)
+        if "reminder_validation" in result:
+            (run / "reminder_validation.json").write_text(
+                json.dumps(result["reminder_validation"], ensure_ascii=False, allow_nan=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
         compare = stage / "comparison.json"
         public = {"meta": {**result["meta"], "run_id": run_id}, "periods": result["periods"]}
         compare.write_text(json.dumps(public, ensure_ascii=False, allow_nan=False, indent=2) + "\n",
@@ -157,6 +167,7 @@ def main():
     for key, label in PERIODS:
         parser.add_argument(f"--{key}", type=parse_window, help=f"{label}，YYYY-MM-DD:YYYY-MM-DD")
     parser.add_argument("--initial-cash", type=float, default=100000.0)
+    parser.add_argument("--baseline-code", help="预先指定数据包中的买入持有基准；省略则使用现金基准")
     parser.add_argument("--output", type=Path, default=ROOT / "output" / "v1_validation")
     args = parser.parse_args()
     windows = {key: getattr(args, key) for key in PERIOD_KEYS}
@@ -170,7 +181,7 @@ def main():
             if not all(windows.values()):
                 parser.error("--bundle 须同时提供 --development、--validation、--holdout")
             bundle, digest = load_bundle(args.bundle)
-        result = evaluate(bundle, windows, args.initial_cash, bundle_sha256=digest)
+        result = evaluate(bundle, windows, args.initial_cash, bundle_sha256=digest, baseline_code=args.baseline_code)
         report_path = save_comparison(result, args.output)
     except (ValueError, OSError) as exc:
         parser.error(str(exc))

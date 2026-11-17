@@ -73,8 +73,9 @@ def import_history(manifest_path):
     bundle = {key: manifest[key] for key in ('version', 'price_basis')}
     bundle.update(source=manifest.get('source'), calendar_source=manifest.get('calendar_source'),
                   input_digests=digests, benchmark=[], securities={})
-    if 'demo' in manifest:
-        bundle['demo'] = manifest['demo']
+    for key in ('demo', 't_replay'):
+        if key in manifest:
+            bundle[key] = manifest[key]
     bundle['calendar'] = sorted(row['date'] for row in csv_rows(inputs['calendar'], ('date',), 'calendar'))
     securities = bundle['securities']
     for row in csv_rows(inputs['daily'], DAILY, 'daily'):
@@ -116,7 +117,10 @@ def import_history(manifest_path):
         session = securities.get(code, {}).get('sessions', {}).get(day, {})
         if session.get('status') != 'open':
             raise ValueError(f'{code} {day} 的分钟记录缺少对应开市场次')
-        session['minutes'].append({'time': row['time'], **candle(row), 'volume': int(row['volume'])})
+        bar = {'time': row['time'], **candle(row), 'volume': int(row['volume'])}
+        if row.get('amount'):
+            bar['amount'] = float(row['amount'])
+        session['minutes'].append(bar)
     for item in securities.values():
         for session in item['sessions'].values():
             if session['status'] == 'open':
@@ -188,7 +192,7 @@ def write_demo_manifest(directory):
             minutes.extend(dict(bar, date=day, code=code) for bar in source.get('minutes', []))
     write_csv('daily', (*DAILY, 'amount', 'complete'), daily)
     write_csv('sessions', (*SESSION, 'open', 'upper_limit', 'lower_limit'), sessions)
-    write_csv('minutes', MINUTE, minutes)
+    write_csv('minutes', (*MINUTE, 'amount'), minutes)
     write_csv('universe', ('date', 'code'), (
         {'date': day, 'code': code}
         for day in bundle['calendar'][-4:-1] for code in bundle['securities']

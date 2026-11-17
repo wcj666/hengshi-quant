@@ -22,6 +22,7 @@ from v1_backtest_report import save_report, summarize
 ROOT = Path(__file__).resolve().parent
 PROFILE = 'v1-minutes-1'
 REVIEW_FIELDS = ('fundamentals_ok', 'event_clear', 'corporate_action_clear', 'resistance_clear')
+PROFIT_TARGETS = ('take_profit_1', 'take_profit_2')
 DEFAULT_COSTS = {
     'commission_rate': 0.0005,
     'minimum_commission': 5.0,
@@ -91,7 +92,7 @@ class Position:
 
 
 class Replay:
-    def __init__(self, bundle, start, end, initial_cash, costs):
+    def __init__(self, bundle, start, end, initial_cash, costs, *, disabled_profit_targets=()):
         self.bundle = bundle
         self.symbols = bundle['securities']
         self.calendar = bundle['calendar']
@@ -110,6 +111,10 @@ class Replay:
                 raise ValueError(f'费用或参与率参数无效：{key}')
         if self.cost_model['slippage_rate'] >= 1:
             raise ValueError('滑点率须低于100%')
+        if (not isinstance(disabled_profit_targets, (list, tuple, set, frozenset))
+                or any(target not in PROFIT_TARGETS for target in disabled_profit_targets)):
+            raise ValueError('退出对照只能关闭第一或第二止盈')
+        self.disabled_profit_targets = frozenset(disabled_profit_targets)
         self.initial_cash = self.cash = self.high_water = money(initial_cash)
         daily_fields = ['date', 'open', 'high', 'low', 'close', 'volume', 'amount', 'complete']
         self.benchmark = self.daily_frame(bundle['benchmark'], daily_fields)
@@ -121,6 +126,7 @@ class Replay:
         self.closed_trades = []
         self.equity_curve = []
         self.decisions = []
+        self.reminders = {}
         self.seen_decisions = set()
         self.missing_execution_data = set()
         self.halted = None
@@ -143,6 +149,41 @@ class Replay:
         if key not in self.seen_decisions:
             self.seen_decisions.add(key)
             self.decisions.append(dict(date=day, code=code, at=at, reason=reason, detail=detail))
+
+    def reminder(self, kind, code, stamp, *, opened_on=None, target_quantity=None):
+        day = stamp.date().isoformat()
+        key = (code, opened_on or day, kind)
+        if key not in self.reminders:
+            self.reminders[key] = {
+                'kind': kind, 'code': code, 'date': day, 'at': stamp.isoformat(),
+                'opened_on': opened_on, 'target_quantity': target_quantity,
+                'filled': False, 'filled_quantity': 0, 'fill_count': 0, 'blocked_reasons': [],
+            }
+        return self.reminders[key]
+
+    @staticmethod
+    def block_reminder(reminder, reason):
+        if reason not in reminder['blocked_reasons']:
+            reminder['blocked_reasons'].append(reason)
+
+    @staticmethod
+    def fill_reminder(reminder, fill):
+        reminder['filled'] = True
+        reminder['filled_quantity'] += fill['quantity']
+        reminder['fill_count'] += 1
+        reminder.setdefault('first_fill_at', fill['at'])
+        reminder['last_fill_at'] = fill['at']
+
+    def reminder_report(self):
+        rows = sorted(self.reminders.values(), key=lambda row: (row['at'], row['code'], row['kind']))
+        for row in rows:
+            target = row['target_quantity']
+            row['status'] = ('no_fill' if not row['filled'] else 'partial'
+                             if target is not None and row['filled_quantity'] < target else 'filled')
+            if not row['filled'] and not row['blocked_reasons']:
+                # There may be no next eligible minute before the window ends.
+                self.block_reminder(row, 'no_eligible_fill_in_window')
+        return rows
 
     def setups_for(self, index):
         if index == 0:
@@ -254,20 +295,25 @@ class Replay:
                 or (kind == 'etf' and not review['equity_etf'])):
             self.note(day, code, 'point_in_time_review_rejected', at=at)
             return False
+        reminder = self.reminder('breakout', code, now)
         reference = bar['open']
         if not trigger <= reference <= cap:
             self.note(day, code, 'entry_outside_range', at=at)
+            self.block_reminder(reminder, 'entry_outside_range')
             return False
         price = try_price(reference, kind, 'buy', tick_slippage)
         if not session['lower_limit'] < reference < session['upper_limit'] or price >= session['upper_limit']:
             self.note(day, code, 'entry_price_limit', at=at)
+            self.block_reminder(reminder, 'entry_price_limit')
             return False
         if price > cap:
             self.note(day, code, 'slippage_above_cap', at=at)
+            self.block_reminder(reminder, 'slippage_above_cap')
             return False
         equity = self.mark(prices)
         if equity is None:
             self.note(day, code, 'held_quotes_missing', at=at)
+            self.block_reminder(reminder, 'held_quotes_missing')
             return False
         plan = {**levels, 'strategy_version': '1.0', 'setup_verified': True, 'name': review['name'],
                 'sector': review['sector'], 'signal_date': setup['signal_date'],
@@ -275,6 +321,7 @@ class Replay:
         sized, available_risk = self.risk_quantity(code, kind, plan, prices, price, equity, index)
         if not sized['max_buy_shares']:
             self.note(day, code, 'risk_blocked', at=at, detail=sized['reason'])
+            self.block_reminder(reminder, 'risk_blocked')
             return False
         qty = min(sized['max_buy_shares'], round_lot(previous['volume'] * self.cost_model['prior_minute_participation']))
         stop_fill = try_price(levels['stop_loss'], kind, 'sell', tick_slippage)
@@ -295,44 +342,76 @@ class Replay:
                              take_profit_1=levels['take_profit_1'], take_profit_2=levels['take_profit_2'],
                              entry_cap=cap, trigger_price=trigger, review_recorded_at=review['recorded_at'],
                              review_sources=review['sources'])
+                self.fill_reminder(reminder, trade)
                 self.positions[code] = Position(code, kind, plan, day, price, buy_fee, risk, qty, qty)
                 return True
             qty -= 100
         self.note(day, code, 'round_lot_cost_or_depth', at=at)
+        self.block_reminder(reminder, 'round_lot_cost_or_depth')
         return False
+
+    def exit_candidate(self, position, bar):
+        if position.stop_signal_at:
+            return 'stop_loss', position.quantity
+        if 'take_profit_2' not in self.disabled_profit_targets and bar['high'] >= position.plan['take_profit_2']:
+            return 'take_profit_2', position.quantity
+        remaining = position.first_target_quantity - position.tp1_sold
+        if ('take_profit_1' not in self.disabled_profit_targets and remaining > 0
+                and bar['high'] >= position.plan['take_profit_1']):
+            return 'take_profit_1', remaining
+        return None
+
+    def observe_entries(self, day, label, setups, current, unavailable):
+        # The completed bar is known here even when no adjacent bar is supplied.
+        # These windows are the signal times for the next-bar entry windows below.
+        if not ('09:45' <= label <= '11:29' or '13:01' <= label <= '14:44'):
+            return
+        stamp = execution_time(day, label)
+        for code, setup in setups.items():
+            if code not in current or code in unavailable:
+                continue
+            trigger, cap = setup['levels']['trigger_price'], setup['levels']['entry_price']
+            if not trigger <= current[code]['close'] <= cap:
+                continue
+            review = self.review_for(code, setup, stamp)
+            if (review and all(review[key] for key in REVIEW_FIELDS)
+                    and (self.symbols[code]['type'] != 'etf' or review['equity_etf'])):
+                self.reminder('breakout', code, stamp)
 
     def sell(self, index, label, position, previous, bar, session):
         day = self.calendar[index]
         now = execution_time(day, label, open_of_bar=True)
         code = position.code
-        tp1 = position.plan['take_profit_1']
-        tp2 = position.plan['take_profit_2']
-        if position.stop_signal_at:
-            reason, quantity = 'stop_loss', position.quantity
-        elif previous['high'] >= tp2:
-            reason, quantity = 'take_profit_2', position.quantity
-        elif previous['high'] >= tp1 and position.tp1_sold < position.first_target_quantity:
-            reason, quantity = 'take_profit_1', position.first_target_quantity - position.tp1_sold
-        else:
+        candidate = self.exit_candidate(position, previous)
+        if candidate is None:
             return
+        reason, quantity = candidate
+        signal_stamp = (datetime.fromisoformat(position.stop_signal_at) if position.stop_signal_at
+                        else execution_time(day, previous['time']))
+        reminder = self.reminder(reason, code, signal_stamp, opened_on=position.bought_on,
+                                 target_quantity=quantity)
         if day <= position.bought_on:
             self.note(day, code, 't_plus_one', at=now.isoformat(), detail=reason)
+            self.block_reminder(reminder, 't_plus_one')
             return
         reference = bar['open']
         price = try_price(reference, position.kind, 'sell', self.cost_model['slippage_rate'])
         if reference <= session['lower_limit'] or price <= session['lower_limit']:
             self.note(day, code, 'exit_price_limit', at=now.isoformat(), detail=reason)
+            self.block_reminder(reminder, 'exit_price_limit')
             return
-        if reason != 'stop_loss' and price < (tp2 if reason == 'take_profit_2' else tp1):
+        if reason != 'stop_loss' and price < position.plan[reason]:
             self.note(day, code, 'target_not_executable_at_next_open', at=now.isoformat(), detail=reason)
+            self.block_reminder(reminder, 'target_not_executable_at_next_open')
             return
         quantity = min(quantity, round_lot(previous['volume'] * self.cost_model['prior_minute_participation']))
         if quantity < 100:
             self.note(day, code, 'exit_depth_insufficient', at=now.isoformat(), detail=reason)
+            self.block_reminder(reminder, 'exit_depth_insufficient')
             return
-        signal_at = position.stop_signal_at or execution_time(day, previous['time']).isoformat()
         fill = self.record_fill(code, position.kind, 'sell', quantity, reference, price, now, label, reason,
-                                signal_at=signal_at, signal_date=position.plan['signal_date'])
+                                signal_at=signal_stamp.isoformat(), signal_date=position.plan['signal_date'])
+        self.fill_reminder(reminder, fill)
         position.quantity -= quantity
         position.realized_gross = money(position.realized_gross + (price - position.entry_price) * quantity)
         position.exit_fees = money(position.exit_fees + fill['fees'])
@@ -408,10 +487,24 @@ class Replay:
                             break
             # Read high, low, close and volume only once this bar is complete.
             for code, position in self.positions.items():
-                if code in current and not position.stop_signal_at and current[code]['low'] <= position.stop:
-                    position.stop_signal_at = execution_time(day, label).isoformat()
+                if code not in current:
+                    continue
+                bar = current[code]
+                stamp = execution_time(day, label)
+                if not position.stop_signal_at and bar['low'] <= position.stop:
+                    position.stop_signal_at = stamp.isoformat()
                     if position.bought_on == day:
                         self.note(day, code, 't_plus_one', at=position.stop_signal_at, detail='止损已触发，等待可卖')
+                candidate = self.exit_candidate(position, bar)
+                if candidate:
+                    kind, quantity = candidate
+                    signal_stamp = datetime.fromisoformat(position.stop_signal_at) if position.stop_signal_at else stamp
+                    reminder = self.reminder(kind, code, signal_stamp, opened_on=position.bought_on,
+                                             target_quantity=quantity)
+                    if day <= position.bought_on:
+                        self.block_reminder(reminder, 't_plus_one')
+            if not opened_code and not (self.positions.keys() & (broken | suspended)):
+                self.observe_entries(day, label, setups, current, broken | cancelled.keys())
             closing_prices = {code: bar['close'] for code, bar in current.items()}
             closing_prices.update({code: self.last_close[code] for code in suspended})
             self.mark(closing_prices)
@@ -421,6 +514,13 @@ class Replay:
             if code != opened_code and code not in reasons_recorded:
                 reason = 'daily_entry_limit' if opened_code else 'trigger_not_filled'
                 self.note(day, code, reason, at=execution_time(day, '14:45').isoformat())
+        for code in setups:
+            reminder = self.reminders.get((code, day, 'breakout'))
+            if reminder and not reminder['filled']:
+                if code in broken:
+                    self.block_reminder(reminder, 'minute_gap')
+                if opened_code and opened_code != code:
+                    self.block_reminder(reminder, 'daily_entry_limit')
         self.last_close.update(closing_prices)
         missing_marks = sorted(self.positions.keys() - closing_prices.keys())
         equity = self.mark(closing_prices)
@@ -441,9 +541,11 @@ class Replay:
         return self
 
 
-def run_backtest(bundle, start, end, initial_cash=100000.0, *, bundle_sha256=None, costs=None):
+def run_backtest(bundle, start, end, initial_cash=100000.0, *, bundle_sha256=None, costs=None,
+                 disabled_profit_targets=()):
     validate_bundle(bundle)
-    simulation = Replay(bundle, start, end, initial_cash, costs).run()
+    simulation = Replay(bundle, start, end, initial_cash, costs,
+                        disabled_profit_targets=disabled_profit_targets).run()
     summary = summarize(simulation.initial_cash, simulation.equity_curve, simulation.fills,
                         simulation.closed_trades, bundle['securities'], simulation.decisions)
     summary['execution_coverage_complete'] = not simulation.missing_execution_data and not simulation.halted
@@ -468,6 +570,11 @@ def run_backtest(bundle, start, end, initial_cash=100000.0, *, bundle_sha256=Non
             'engine_sha256': hashlib.sha256(b''.join((ROOT / f).read_bytes() for f in engine_files)).hexdigest(),
             'price_basis': bundle['price_basis'], 'initial_cash': simulation.initial_cash,
             'rules': simulation.settings, 'costs': simulation.cost_model, 'universe_size': len(bundle['securities']),
+            'disabled_profit_targets': sorted(simulation.disabled_profit_targets),
+            'reminder_counting': '买入按证券和信号交易日计一次，需完成分钟进入固定区间并通过当时的复核。'
+                                 '止盈、止损按每次持仓及各类触发计一次。'
+                                 '同一提醒有任意相关模拟成交即计为可成交，部分成交单独注明。'
+                                 '重复触发及多笔分批成交合并。关闭止盈仅改变这一档退出，买入及止损规则保持不变。',
             'halted': simulation.halted,
             'execution_model': '收盘后计算信号。次交易日观察已完成分钟，按下一分钟开盘估算成交，'
                                '可成交量以此前一完整分钟成交量乘参与率估算。T+1，固定止损和两段目标，'
@@ -482,6 +589,7 @@ def run_backtest(bundle, start, end, initial_cash=100000.0, *, bundle_sha256=Non
         },
         'summary': summary, 'fills': simulation.fills, 'closed_trades': simulation.closed_trades,
         'equity_curve': simulation.equity_curve, 'decisions': simulation.decisions,
+        'reminders': simulation.reminder_report(),
         'open_positions': [
             dict(code=p.code, quantity=p.quantity, entry_price=p.entry_price, stop_loss=p.stop,
                  initial_risk=p.initial_risk, stop_pending=p.stop_signal_at is not None) for p in simulation.positions.values()

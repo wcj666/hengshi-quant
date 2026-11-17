@@ -1,0 +1,104 @@
+.reminder-validation {
+  margin-top: 20px;
+}
+.reminder-validation .reminder-status {
+  margin: 0 0 12px;
+}
+.reminder-source {
+  overflow-wrap: anywhere;
+}
+.reminder-validation h3 {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+.reminder-validation h4 {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+.reminder-recommendations {
+  margin-top: 18px;
+}
+.reminder-recommendations .wrap-cell {
+  width: 70%;
+}
+.reminder-period {
+  padding-top: 16px;
+  margin-top: 16px;
+  border-top: 1px solid var(--line);
+}
+.reminder-period-date {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.reminder-comparisons {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.reminder-comparison {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+}
+.reminder-comparison table {
+  font-variant-numeric: tabular-nums;
+}
+.reminder-comparison th,
+.reminder-comparison td {
+  padding: 7px 8px;
+}
+.reminder-comparison tbody th {
+  background: transparent;
+  color: inherit;
+}
+.reminder-comparison .table-wrap + .table-wrap {
+  margin-top: 9px;
+}
+.reminder-note {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.reminder-rate-note {
+  margin: 9px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+.reminder-ablation {
+  margin-top: 10px;
+}
+.reminder-ablation summary {
+  margin-bottom: 7px;
+  color: var(--blue);
+  cursor: pointer;
+}
+.reminder-tag {
+  display: inline-block;
+  padding: 3px 7px;
+  border-radius: 5px;
+  background: #edf2f8;
+  color: #344e6b;
+  font-size: 12px;
+  font-weight: 600;
+}
+.reminder-tag.warn {
+  background: #fff2db;
+  color: #784c19;
+}
+.reminder-tag.good {
+  background: #e9f5f1;
+  color: #176653;
+}
+@media (max-width: 920px) {
+  .reminder-comparisons {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 520px) {
+  .reminder-recommendations .wrap-cell {
+    min-width: 190px;
+  }
+}

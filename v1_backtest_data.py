@@ -116,6 +116,8 @@ def _validate_session(value, label):
         volume = row.get("volume")
         if type(volume) is not int or volume < 0:
             raise ValueError(f"{path}.volume 必须是非负整数，单位为股或份")
+        if "amount" in row:
+            _number(row["amount"], f"{path}.amount", zero_allowed=True)
 
 
 def _validate_review(value, label, *, etf):

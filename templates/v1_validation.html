@@ -6,7 +6,9 @@
   <title>回测区间对照 · 衡势</title>
   <link rel="icon" href="/static/hengshi-logo.svg">
   <link rel="stylesheet" href="/static/v1_backtest.css">
+  <link rel="stylesheet" href="/static/reminder_validation.css">
   <script src="/static/v1_validation.js" defer></script>
+  <script src="/static/reminder_validation.js" defer></script>
 </head>
 <body>
 <main class="page">
@@ -17,7 +19,36 @@
     </div>
     <button id="refresh" type="button">刷新报告</button>
   </header>
-  <p id="status" class="status" role="status">正在读取区间对照…</p>
+  <section id="reminder-validation" class="panel reminder-validation" aria-labelledby="reminder-validation-title">
+    <div class="section-head">
+      <div>
+        <h2 id="reminder-validation-title">买卖与做 T 提醒验证</h2>
+        <p>按时间分段，对照扣费后收益、最大日终回撤和模拟成交情况。</p>
+      </div>
+      <span id="reminder-validation-sample" class="sample-type" hidden></span>
+    </div>
+    <p id="reminder-validation-status" class="status reminder-status" role="status">正在读取提醒验证结果…</p>
+    <div id="reminder-validation-empty" hidden>
+      <p>用已导入的历史回放数据包生成报告。运行时指定开发、验证和留出三个互不重叠的区间。</p>
+      <p>用 <code>v1_validation.py --bundle</code> 读取既有数据。可用 <code>--baseline-code</code> 指定数据包中的持有基准。做 T 另需原始分钟成交额和预先记录的底仓场景。</p>
+      <a href="/backtest">查看回放数据包和导入说明</a>
+    </div>
+    <div id="reminder-validation-results" hidden>
+      <p id="reminder-validation-source" class="subtle reminder-source"></p>
+      <ul id="reminder-validation-warnings" class="limitations"></ul>
+      <section id="reminder-validation-recommendations" class="reminder-recommendations" aria-labelledby="reminder-recommendations-title" hidden>
+        <h3 id="reminder-recommendations-title">提醒筛选结果</h3>
+        <div class="table-wrap" tabindex="0" role="region" aria-labelledby="reminder-recommendations-title">
+          <table>
+            <thead><tr><th scope="col">提醒</th><th scope="col">区间结论</th><th scope="col">依据</th></tr></thead>
+            <tbody id="reminder-validation-recommendation-rows"></tbody>
+          </table>
+        </div>
+      </section>
+      <div id="reminder-validation-periods"></div>
+    </div>
+  </section>
+    <p id="status" class="status" role="status">正在读取区间对照…</p>
   <section id="report" hidden>
     <div class="run-header">
       <p id="source" class="sample-range"></p>

@@ -329,6 +329,23 @@ def create_app(folder:Path=ROOT):
             return jsonify(error='区间对照报告损坏，请重新生成。'), 409
         return jsonify(report)
 
+    @app.route('/api/backtest/reminder-validation')
+    def reminder_validation_report():
+        from reminder_validation import no_data
+        comparison = strategy.read(output / 'v1_validation' / 'comparison.json')
+        meta = comparison.get('meta', {}) if isinstance(comparison, dict) else {}
+        run_id = meta.get('run_id') if isinstance(meta, dict) else None
+        if not isinstance(run_id, str) or not re.fullmatch(r'[a-f0-9]{32}', run_id):
+            return jsonify(no_data())
+        path = output / 'v1_validation' / 'runs' / run_id / 'reminder_validation.json'
+        if not path.is_file():
+            return jsonify(no_data())
+        report = strategy.read(path)
+        if (not isinstance(report, dict) or not isinstance(report.get('meta'), dict)
+                or not isinstance(report.get('periods'), list) or not isinstance(report.get('recommendations'), list)):
+            return jsonify(error='提醒验证报告损坏，请重新运行区间回放。'), 409
+        return jsonify(report)
+
     @app.route('/backtest/validation/download')
     def download_backtest_comparison():
         path = output / 'v1_validation' / 'comparison.json'
