@@ -690,7 +690,7 @@ def create_app(folder:Path=ROOT):
     @app.route('/api/action-center')
     def action_center_api():
         from action_center import build_actions
-        from alert_journal import load_journal
+        from alert_journal import load_journal, notification_policy, held_observation
         with WRITE_LOCK:
             cfg=config()
             state=intraday_state().get_json()
@@ -699,9 +699,12 @@ def create_app(folder:Path=ROOT):
             journal=load_journal(output,cfg.get('reconciled_trades',[]))
         live_by_id = {signal['id']: signal for signal in payload['signals']}
         cards_by_id = {card['alert_id']: card for card in payload['cards'] if card['alert_id']}
-        relevant = {ident for ident, signal in live_by_id.items() if signal['code'] == 'PORT'} | cards_by_id.keys()
+        relevant = {ident for ident, signal in live_by_id.items()
+                    if signal['code'] == 'PORT' or held_observation(signal)} | cards_by_id.keys()
         archived = {row['id']: row for row in journal['rows'] if row['id'] in relevant}
         payload['alerts'] = []
+        for ident, row in archived.items():
+            row.update(notification_policy(live_by_id[ident]))
         for ident, card in cards_by_id.items():
             card['notification'] = notification_status(archived.get(ident))
         for ident, row in archived.items():
@@ -710,17 +713,21 @@ def create_app(folder:Path=ROOT):
             current = live_by_id[ident]
             card = cards_by_id.get(ident)
             row.update(price=current.get('price'), level=current.get('level'), reason=current.get('reason'),
+                       blockers=current.get('blockers') or [],
                        quantity=card.get('quantity') if card else None,
-                       expires_at=(card or payload)['expires_at'])
+                       expires_at=(payload.get('signal_expires_at') or {}).get(ident) or (card or payload)['expires_at'])
+            if not card:
+                row['side'] = None
             if card and card['quantity'] is None:
                 row['side'] = None
-                if current.get('category') in ('t', 'add'):
+                if current.get('category') == 'add' or (
+                        current.get('category') == 't' and current.get('trigger') != 'sell_watch'):
                     row['native'] = False
             payload['alerts'].append(row)
         enabled = state.get('desktop_notifications_enabled')
         payload['preferences'] = {'mode': payload['mode'],
             'native_sound': (cfg.get('execution_preferences') or {}).get('native_sound') is True}
-        payload['desktop_status'] = ('后台桌面通知已开启' if enabled is True else
+        payload['desktop_status'] = ('后台桌面通知已开启；提交成功不等于横幅已送达' if enabled is True else
                                      '后台桌面通知未开启' if enabled is False else '后台桌面通知状态未上报')
         errors = state.get('errors') or []
         if any(message.startswith('提醒记录保存失败') for message in errors if isinstance(message, str)):

@@ -101,6 +101,21 @@ def _alert_side(signal):
     return None
 
 
+def held_observation(signal):
+    return signal.get('held') is True and (
+        signal.get('category') == 'reduce'
+        and signal.get('trigger') in ('structure_support', 'structure_weakness')
+        or signal.get('category') == 't' and signal.get('trigger') == 'sell_watch'
+    )
+
+
+def notification_policy(signal):
+    """Important held-position observations notify once without becoming orders."""
+    side = _alert_side(signal)
+    strong = signal.get('priority') == 'high' or bool(side)
+    return {'native': bool(strong or held_observation(signal)), 'repeatable': bool(strong)}
+
+
 def capture_rows(events, signals, quotes, plans, *, now, source, config_hash):
     """Build stable observation rows; overlap between basic and V1 alerts is merged."""
     now = _clock(now)
@@ -116,14 +131,13 @@ def capture_rows(events, signals, quotes, plans, *, now, source, config_hash):
         side = _alert_side(event)
         row = {
             'id': event['id'], 'code': code, 'name': event['name'], 'kind': event['title'],
-            'side': side, 'quantity': _quantity(event.get('shares')), 'category': event.get('category'),
+            'side': side, 'quantity': _quantity(event.get('shares')) if side else None, 'category': event.get('category'),
             'at': stamp, 'day': day, 'quote_at': quote_at, 'price': _number(event.get('price')),
             'level': _number(event.get('level')), 'trigger': trigger, 'reason': event.get('reason'),
             'blockers': event.get('blockers') or [], 'source': source, 'config_hash': config_hash,
             'signal_date': plans.get(code, {}).get('signal_date'),
             'entry_cap': _number(plans.get(code, {}).get('entry_price')) if trigger == 'v1_entry' else None,
-            'native': bool(event.get('priority') == 'high' or side),
-            'repeatable': bool(event.get('priority') == 'high' or side),
+            **notification_policy(event),
         }
         result.append(row)
         seen_triggers.add((code, row['kind'] if code == 'PORT' else trigger))
@@ -225,7 +239,8 @@ def persist_cycle(output, rows, *, now, notify=False, send=None, clock=None, tra
                 }}
             saved = journal[ident]
             saved.update(active=_can_notify(now), last_seen_at=now.isoformat(timespec='seconds'),
-                         latest_quote_at=row.get('quote_at'), latest_price=row.get('price'))
+                         latest_quote_at=row.get('quote_at'), latest_price=row.get('price'),
+                         latest_native=row['native'], latest_repeatable=row.get('repeatable', bool(row.get('side'))))
             if saved['active']:
                 saved['inactive_at'] = None
                 saved.pop('inactive_reason', None)
@@ -401,6 +416,8 @@ def load_journal(output, trades=(), *, now=None):
                 status = 'pending' if active else 'inactive'
             result.append({
                 **row, 'filled_quantity': quantity, 'status': status, 'expired': expired,
+                'native': row.get('latest_native', row.get('native', False)),
+                'repeatable': row.get('latest_repeatable', row.get('repeatable', bool(row.get('side')))),
                 'active': active, 'feedback': feedback,
                 'fills': [{k: fill.get(k) for k in ('fill_id', 'quantity', 'price', 'executed_at')} for fill in fills],
                 'replay': _minutes_comparison(report, row),
@@ -493,15 +510,13 @@ def _review_status(row, filled, unlinked):
 
 def _notification_label(row):
     result = row.get('notification') or {}
-    if not row.get('native'):
-        return '无桌面通知'
     if result.get('outcome') == 'failed':
         return '桌面通知提交失败'
     if result.get('outcome') in ('sending', 'unknown'):
         return '桌面通知送达待确认'
     if result.get('submitted'):
         return '桌面通知已提交'
-    return '桌面通知未提交'
+    return '桌面通知未提交' if row.get('latest_native', row.get('native')) else '无桌面通知'
 
 
 def load_close_review(output, day, trades=(), *, now=None):

@@ -182,6 +182,40 @@ class AlertJournalTests(TestCase):
                                send=lambda _: self.fail('informational alert repeated'))
         self.assertEqual(result['attempted'], 0)
 
+    def test_held_structure_and_t_watch_notify_once_without_order_fields(self):
+        for category, trigger in [('reduce', 'structure_support'), ('reduce', 'structure_weakness'),
+                                  ('t', 'sell_watch')]:
+            with self.subTest(trigger=trigger), TemporaryDirectory() as folder:
+                self.signal.update(category=category, trigger=trigger, held=True,
+                                   blockers=['固定退出计划待核'], tradable=False, shares=200)
+                rows = self.rows()
+                self.assertTrue(rows[0]['native'])
+                self.assertFalse(rows[0]['repeatable'])
+                self.assertIsNone(rows[0]['side'])
+                self.assertIsNone(rows[0]['quantity'])
+                first = persist_cycle(folder, rows, now=AT, notify=True, send=lambda _: True)
+                self.assertEqual(first['submitted'], 1)
+                later = AT + timedelta(seconds=60)
+                repeat = persist_cycle(folder, self.rows(later), now=later, notify=True,
+                                       send=lambda _: self.fail('observation repeated'))
+                self.assertEqual(repeat['attempted'], 0)
+                self.signal['held'] = False
+                self.assertFalse(self.rows()[0]['native'])
+
+    def test_current_eligibility_updates_without_rewriting_initial_evidence(self):
+        self.signal.update(category='t', trigger='sell_watch', held=False, shares=None)
+        persist_cycle(self.output, self.rows(), now=AT)
+        self.signal['held'] = True
+        later = AT + timedelta(seconds=10)
+        persist_cycle(self.output, self.rows(later), now=later)
+        current = self.read(now=later)
+        self.assertTrue(current['native'])
+        saved = json.loads((self.output / 'alert_journal' / '2024-06-17.json').read_text())[ALERT_ID]
+        self.assertFalse(saved['native'])
+        self.assertTrue(saved['latest_native'])
+        self.assertEqual(saved['at'], AT.isoformat())
+        self.assertEqual(saved['notification']['attempts'], 0)
+
     def test_unknown_repeat_submission_cannot_retry_or_overwrite_prior_success(self):
         persist_cycle(self.output, self.rows(), now=AT, notify=True, send=lambda _: True)
         later = AT + timedelta(seconds=60)

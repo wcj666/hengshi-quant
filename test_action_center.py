@@ -78,6 +78,42 @@ class ActionTests(unittest.TestCase):
     self.assertEqual(client.post(path,headers=headers).status_code,503)
     self.assertEqual(client.post(path,headers=headers).status_code,429)
     send.assert_called_once()
+ def test_held_t_observation_is_visible_without_executable_quantity(self):
+  with TemporaryDirectory() as t:
+   root=Path(t);(root/'config.json').write_text(json.dumps(self.cfg));client=create_app(root).test_client()
+   signal={'id':'a'*20,'code':'159971','held':True,'category':'t','trigger':'sell_watch',
+           'price':1.,'level':1.,'blockers':['退出计划待核'],'reason':'高抛条件观察'}
+   card={'alert_id':signal['id'],'quantity':None,'expires_at':self.now.isoformat()}
+   original={'id':signal['id'],'native':False,'active':True,'status':'pending','side':None}
+   payload={'cards':[card],'signals':[signal],'mode':'normal','expires_at':self.now.isoformat()}
+   with patch('action_center.build_actions',return_value=payload),patch('alert_journal.load_journal',return_value={'rows':[original]}):
+    result=client.get('/api/action-center')
+   self.assertEqual(result.status_code,200)
+   row=result.json['alerts'][0]
+   self.assertTrue(row['native']);self.assertFalse(row['repeatable'])
+   self.assertIsNone(row['side']);self.assertIsNone(row['quantity'])
+   self.assertEqual(row['reason'],'高抛条件观察')
+ def test_structure_card_does_not_hide_concurrent_t_observation(self):
+  code='159971';self.book['revision']='same'
+  structure={**self.state['trade_signals'][0],'trigger':'structure_support','held':True,'shares':None}
+  watch={'id':'b'*20,'code':code,'held':True,'category':'t','trigger':'sell_watch',
+         'price':1.,'level':1.,'reason':'等待高抛复核','tradable':False}
+  self.state['trade_signals']=[structure,watch]
+  minute=self.now-timedelta(seconds=130)
+  self.state['t_observe']={'ledger_revision':'same','asof':self.now.isoformat(),
+      'rows':[{'code':code,'minute_source_at':self.now.isoformat(),'minute_asof':minute.isoformat()}]}
+  payload=self.run_action()
+  self.assertEqual(payload['cards'][0]['alert_id'],structure['id'])
+  self.assertEqual(payload['signal_expires_at'][watch['id']],(self.now+timedelta(seconds=20)).isoformat())
+  rows=[{'id':s['id'],'active':True,'status':'pending','native':False,'side':None} for s in [structure,watch]]
+  with TemporaryDirectory() as t:
+   root=Path(t);(root/'config.json').write_text(json.dumps(self.cfg));client=create_app(root).test_client()
+   with patch('action_center.build_actions',return_value=payload),patch('alert_journal.load_journal',return_value={'rows':rows}):
+    result=client.get('/api/action-center').json
+  self.assertEqual({r['id'] for r in result['alerts']},{structure['id'],watch['id']})
+  self.assertTrue(all(r['native'] and r['quantity'] is None and r['side'] is None for r in result['alerts']))
+  t_alert=next(r for r in result['alerts'] if r['id']==watch['id'])
+  self.assertEqual(t_alert['expires_at'],payload['signal_expires_at'][watch['id']])
  def test_api_mode_is_explicit_csrf_and_preserves_account(self):
   with TemporaryDirectory() as t:
    root=Path(t);(root/'config.json').write_text(json.dumps(self.cfg));client=create_app(root).test_client()

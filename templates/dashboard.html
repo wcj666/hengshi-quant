@@ -8,8 +8,7 @@
   <link rel="icon" type="image/svg+xml" href="/static/hengshi-logo.svg">
   <link rel="stylesheet" href="/static/dashboard.css?v=3.6.1-strategy-v1">
   <script defer src="/static/dashboard.js?v=3.6.1-strategy-v1"></script>
-  <link rel="stylesheet" href="/static/action_center.css?v=2">
-  <script defer src="/static/action_center.js?v=2"></script>
+  {% include '_live_reminder_assets.html' %}
   <link rel="stylesheet" href="/static/reduction_preview.css?v=1">
   <script defer src="/static/reduction_preview.js?v=1"></script>
 </head>
@@ -56,6 +55,7 @@
         <div class="action-controls"><label>账户模式 <select id="execution-mode"><option value="normal">正常观察（保留所有风控）</option><option value="exit_only">退出休息（暂停新增和做T）</option></select></label><label><input id="native-sound" type="checkbox">桌面通知带声音</label><button class="btn ghost" id="save-execution" type="button">保存模式与通知</button><button class="btn ghost" id="enable-action-sound" type="button">启用并试听网页声音</button><button class="btn ghost" id="mute-action-sound" type="button">关闭网页声音</button><button class="btn ghost" id="test-action-desktop" type="button">测试桌面通知</button></div>
         <p class="tip" id="action-sound-status" role="status">网页声音未启用，可点击试听。</p>
         <p class="tip" id="action-desktop-status" role="status">正在读取桌面通知设置。</p>
+        <p class="tip">桌面通知是 Mac 系统横幅；底部弹窗显示在打开的衡势页面。网页声音需点击启用。重要持仓条件观察提醒一次；可执行复核未处理时最多提醒三次。行情失效或收盘后停止实时提醒。</p>
         <div id="action-cards" class="action-grid"></div><p class="tip" id="action-note"></p>
         <p class="tip">数量是当前核验上限，卖价不保证成交。暂无条件时等待；未确认的计划请到“我的持仓”核对。</p>
       </div>

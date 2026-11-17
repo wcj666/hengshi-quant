@@ -73,6 +73,16 @@ class CloseExecutionReviewTests(unittest.TestCase):
         self.assertFalse(row['can_review'])
         self.assertEqual(row['review_reason'], '缺少完整行情')
 
+    def test_desktop_review_uses_actual_submission_after_policy_change(self):
+        row = self.capture(diagnostic=True)
+        row.update(native=False, repeatable=False)
+        persist_cycle(self.output, [row], now=self.during)
+        self.assertEqual(self.first()['notification_label'], '无桌面通知')
+        row.update(native=True)
+        persist_cycle(self.output, [row], now=self.during, notify=True, send=lambda _: True)
+        self.assertEqual(self.first()['notification_label'], '桌面通知已提交')
+        self.assertEqual(self.first()['review_status'], 'observe')
+
     def test_archive_accepts_individual_actual_close_marks_and_preserves_good_data(self):
         at = self.close
         other = '588170'

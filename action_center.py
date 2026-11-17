@@ -276,7 +276,16 @@ def build_actions(cfg, state, book, *, now=None):
         cards.append(card)
     equity = positive((state.get('risk') or {}).get('equity'))
     reserve = equity * (1 - min(60., float((cfg.get('strategy_v1') or {}).get('max_exposure_pct', 60))) / 100) if valid and equity else None
+    signal_expiries = {}
+    for signal in signals:
+        code = signal['code']
+        deadline = expires if code == 'PORT' else min(
+            expires, parse_provider_time(quotes[code]['source_timestamp']) + timedelta(seconds=90))
+        if signal.get('category') == 't':
+            deadline = min(deadline, t_deadlines[code], now.replace(hour=14, minute=45, second=0, microsecond=0))
+        signal_expiries[signal['id']] = deadline.astimezone(CN).isoformat()
     return {'valid': valid, 'asof': now.isoformat(), 'mode': mode, 'pause_reason': pause,
             'expires_at': expires.isoformat() if expires else None,
-            'cards': cards, 'signals': signals, 'cash_floor': round(reserve, 2) if reserve is not None else None,
+            'cards': cards, 'signals': signals, 'signal_expires_at': signal_expiries,
+            'cash_floor': round(reserve, 2) if reserve is not None else None,
             'note': '各卡现金为单笔估算，不能相加作为组合计划。'}
