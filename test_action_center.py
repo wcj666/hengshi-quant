@@ -4,6 +4,7 @@ from zoneinfo import ZoneInfo
 from tempfile import TemporaryDirectory
 from pathlib import Path
 import unittest,json
+from unittest.mock import patch
 from action_center import build_actions,allowed_signals
 from web_dashboard import create_app,CSRF
 from portfolio_test_fixture import account_fixture
@@ -28,10 +29,55 @@ class ActionTests(unittest.TestCase):
   self.assertIsNone(self.run_action()['cards'][0]['quantity'])
  def test_no_signal_is_wait_not_recommendation(self):
   self.state['trade_signals']=[];self.assertEqual(self.run_action()['cards'][0]['state'],'wait')
+ def test_waiting_entry_shows_distance_and_ceiling_and_drops_outside_signal(self):
+  code='588170'
+  self.cfg['watchlist']=[{'code':code,'name':'观察ETF','type':'etf'}]
+  self.cfg['trade_plans']={code:{'strategy_version':'1.0','trigger_price':.700,'entry_price':.710,'valid_on':str(self.now.date())}}
+  quote={'code':code,'price':.690,'open':.685,'source_timestamp':self.now.isoformat()}
+  self.state['quotes'].append(quote)
+  self.state['trade_signals']=[{'id':'entry','code':code,'category':'add','trigger':'v1_entry','level':.700,'shares':100}]
+  def card():return self.run_action()['cards'][1]
+  self.assertEqual(card()['thresholds'][0]['distance'],.010)
+  self.assertEqual(card()['thresholds'][0]['max_price'],.710)
+  self.assertIsNone(card()['quantity'])
+  quote['price']=.705
+  self.assertEqual(card()['quantity'],100)
+  quote['price']=.711
+  self.assertIsNone(card()['quantity'])
+  self.assertIsNone(card()['alert_id'])
+  quote.update(price=.705,open=.711)
+  self.assertIsNone(card()['quantity'])
+ def test_t_cap_expires_with_minutes_while_actual_remaining_is_preserved(self):
+  code='159971'
+  self.book.update(revision='new',cycles=[{'code':code,'status':'open','sell_price':1.1,'unbought_quantity':120}])
+  self.state['trade_signals']=[{'id':'buyback','code':code,'category':'t','trigger':'buyback_ready',
+    'level':1.,'tradable':True,'shares':100}]
+  row={'code':code,'cycle_id':'actual','target_buy':1.,'status':'做T回补条件观察',
+       'minute_asof':(self.now-timedelta(seconds=60)).isoformat(),'minute_source_at':self.now.isoformat()}
+  self.state['t_observe']={'ledger_revision':'new','asof':self.now.isoformat(),'rows':[row]}
+  card=self.run_action()['cards'][0]
+  self.assertEqual(card['t']['buyback_cap'],1.)
+  self.assertEqual(card['t']['remaining_quantity'],120)
+  self.assertEqual(card['quantity'],100)
+  row['minute_source_at']=(self.now-timedelta(seconds=91)).isoformat()
+  card=self.run_action()['cards'][0]
+  self.assertIsNone(card['quantity'])
+  self.assertNotIn('buyback_cap',card['t'])
+  self.assertEqual(card['t']['remaining_quantity'],120)
  def test_exit_only_filters_entries_and_all_t_actions(self):
   self.cfg['execution_preferences']={'mode':'exit_only'}
   s=[{'category':x} for x in ['reduce','add','t','switch']]
   self.assertEqual(allowed_signals(self.cfg,s),[{'category':'reduce'}])
+ def test_desktop_test_reports_submit_failure_and_honors_security(self):
+  with TemporaryDirectory() as t:
+   root=Path(t);(root/'config.json').write_text(json.dumps(self.cfg));client=create_app(root).test_client()
+   path='/api/action-desktop-test';headers={'X-CSRF-Token':CSRF}
+   with patch('intraday_monitor.native_notice',return_value=False) as send:
+    self.assertEqual(client.post(path).status_code,403)
+    send.assert_not_called()
+    self.assertEqual(client.post(path,headers=headers).status_code,503)
+    self.assertEqual(client.post(path,headers=headers).status_code,429)
+    send.assert_called_once()
  def test_api_mode_is_explicit_csrf_and_preserves_account(self):
   with TemporaryDirectory() as t:
    root=Path(t);(root/'config.json').write_text(json.dumps(self.cfg));client=create_app(root).test_client()

@@ -1,41 +1,309 @@
-/* Explicit feedback is not a fill. Strong alerts always come from current server state. */
-(()=>{
+(() => {
 'use strict';
-window.hengshiActionCenter=true;
-const node=id=>document.getElementById(id), text=x=>String(x??''), esc=x=>text(x).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const amount=x=>Number.isFinite(x)?'¥'+x.toFixed(2):'—',price=x=>Number.isFinite(x)?x.toFixed(3):'—';
-let busy=false,audio=null,sound=false,preferencesDirty=false,loadedPrefs=false,lastSuccess=0;
-const notices=new Map();
-try{for(const [key,value] of JSON.parse(localStorage.getItem('hengshi_strong_alert_counts')||'[]'))notices.set(key,value);}catch{}
-function beep(){if(!sound||!audio)return;const o=audio.createOscillator(),g=audio.createGain();o.connect(g);g.connect(audio.destination);o.frequency.value=760;g.gain.value=.08;o.start();g.gain.exponentialRampToValueAtTime(.001,audio.currentTime+.35);o.stop(audio.currentTime+.4);}
-function resetAlerts(message){node('strong-alerts').replaceChildren();node('action-status').textContent=message;node('action-cards').innerHTML='<p class="tip">实时行动卡已撤销，恢复数据后重新核验。</p>';}
-function drawCards(d){
- node('action-status').textContent=(d.valid?'盘中条件已核验':'暂停实时执行 · 休市或数据待核验')+(d.mode==='exit_only'?' · 退出休息模式':'');
- node('action-note').textContent=(d.cash_floor!=null?'总仓规则对应现金至少 '+amount(d.cash_floor)+'。':'')+d.note;
- node('action-validation').textContent=d.validation_note;
- if(!loadedPrefs&&!preferencesDirty){node('execution-mode').value=d.preferences.mode;node('native-sound').checked=d.preferences.native_sound;loadedPrefs=true;}
- node('action-cards').innerHTML=d.cards.map(c=>`<article class="action-card ${esc(c.state)}"><div class="action-heading"><strong>${esc(c.name)} ${esc(c.code)}</strong><b>${esc(c.label)}</b></div><p>${esc(c.reason)}</p><dl><div><dt>最新参考</dt><dd>${price(c.price)}</dd></div><div><dt>触发参考</dt><dd>${price(c.level)}</dd></div><div><dt>本次核验上限</dt><dd>${c.quantity==null?'待核验':esc(c.quantity)+'份/股'}</dd></div><div><dt>本笔后现金估算</dt><dd>${amount(c.cash_after)}</dd></div></dl><details><summary>固定计划、失效条件与费用</summary><p>买入触发 ${price(c.plan.trigger_price)} / 最高接受价 ${price(c.plan.entry_price)} / 止损 ${price(c.plan.stop_loss)} / 止盈 ${price(c.plan.take_profit_1)}、${price(c.plan.take_profit_2)}</p><p>以上是已记录的固定计划，不代表当前可以买卖。计划日期 ${esc(c.plan.signal_date||'待补')}；有效日 ${esc(c.plan.valid_on||'须按规则核验')}。</p><p>费用预留 ${amount(c.fee)} · ${esc(c.fee_note||'数量或价格待核验')}</p><ul>${c.cancel.map(x=>'<li>'+esc(x)+'</li>').join('')}</ul><p>券商数量证据：${esc(c.inventory_at||'待核验')}；报价：${esc(c.quote_at||'待核验')}。</p></details>${c.alert_id?'<a href="/trade-reconcile?alert_id='+encodeURIComponent(c.alert_id)+'">登记实际成交</a>':''}</article>`).join('')||'<p>暂无当前持仓。</p>';
+window.hengshiActionCenter = true;
+
+const node = id => document.getElementById(id);
+const esc = value => String(value ?? '').replace(/[&<>"']/g, char =>
+  ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[char]));
+const amount = value => Number.isFinite(value) ? '¥' + value.toFixed(2) : '—';
+const price = value => Number.isFinite(value) ? value.toFixed(4).replace(/(\.\d{3})0$/, '$1') : '—';
+const metric = (label, value) => '<div><dt>' + esc(label) + '</dt><dd>' + esc(value) + '</dd></div>';
+const list = values => values.length ? '<ul>' + values.map(value => '<li>' + esc(value) + '</li>').join('') + '</ul>' : '';
+const quantity = value => value == null ? '—' : value + ' 股/份';
+
+let busy = false, audio = null, sound = false, preferencesDirty = false, loadedPrefs = false;
+let current = null, generation = 0, desktopTest = '';
+const notices = new Map();
+try {
+  for (const [key, value] of JSON.parse(localStorage.getItem('hengshi_strong_alert_counts') || '[]')) notices.set(key, value);
+} catch {}
+
+function beep() {
+  if (!sound || !audio || ['suspended','interrupted','closed'].includes(audio.state)) return false;
+  const oscillator = audio.createOscillator(), gain = audio.createGain();
+  oscillator.connect(gain);
+  gain.connect(audio.destination);
+  oscillator.frequency.value = 760;
+  gain.gain.value = .08;
+  oscillator.start();
+  gain.gain.exponentialRampToValueAtTime(.001, audio.currentTime + .35);
+  oscillator.stop(audio.currentTime + .4);
+  return true;
 }
-function drawAlerts(d){
- const active=d.valid?(d.alerts||[]).filter(a=>!['seen','deferred'].includes(a.feedback?.action)&&!['seen','deferred','partial'].includes(a.status)&&a.native):[];
- node('strong-alerts').innerHTML=active.map(a=>`<article class="strong-alert ${a.side==='sell'?'sell':a.side==='buy'?'buy':'risk'}"><div><strong>${esc(a.name)} · ${esc(a.kind)}</strong><p>${esc(a.reason)}</p><span>触发价 ${price(a.level)} · 数量 ${a.quantity==null?'待核验':esc(a.quantity)} · 提醒不是成交</span></div><div class="action-buttons"><button data-id="${esc(a.id)}" data-day="${esc(a.day)}" data-feedback="seen">已看到</button><button data-id="${esc(a.id)}" data-day="${esc(a.day)}" data-feedback="deferred">暂不执行</button>${a.side?'<a href="/trade-reconcile?alert_id='+encodeURIComponent(a.id)+'">登记成交</a>':''}</div></article>`).join('');
- const now=Date.now();let ring=false;
- for(const a of active){const n=notices.get(a.id)||{count:0,last:0};if(n.count<3&&now-n.last>=60000){if(sound){ring=true;n.count++;n.last=now;}notices.set(a.id,n);}}
- if(ring){beep();try{localStorage.setItem('hengshi_strong_alert_counts',JSON.stringify([...notices].slice(-250)));}catch{}}
+
+function resetAlerts(message) {
+  current = null;
+  node('strong-alerts').replaceChildren();
+  node('action-status').textContent = message;
+  node('action-cards').innerHTML = '<p class="tip">实时行动卡已撤销，恢复数据后重新核验。</p>';
+  node('action-note').textContent = '';
 }
-async function refresh(){if(busy)return;busy=true;try{const d=await api('/api/action-center');drawCards(d);drawAlerts(d);lastSuccess=Date.now();}catch(e){resetAlerts('读取失败，暂停提醒：'+e.message);}finally{busy=false;}}
-async function review(){try{const d=await api('/api/t-performance'),s=d.summary;node('t-performance-summary').innerHTML=`<div class="action-metrics"><span>实际配对净收益 <b>${amount(s.actual_paired_net)}</b></span><span>费用待补的估算 <b>${amount(s.estimated_paired_net)}</b></span><span>已结束且费用完整样本 <b>${esc(s.closed_actual_samples??0)}</b></span></div><p>${(d.notes||[]).map(esc).join('；')}</p><p>统计窗口 ${esc(d.window_start)} 至 ${esc(d.window_end)}。未接回部分的持有对比：${amount(s.unmatched_mark_comparison)}（独立估算，非已实现T收益）。</p>`;}catch(e){node('t-performance-summary').textContent='复盘暂不可用：'+e.message;}}
-async function feedback(e){const b=e.target.closest('[data-feedback]');if(!b)return;b.disabled=true;try{await api('/api/action-feedback/'+encodeURIComponent(b.dataset.id),'POST',{action:b.dataset.feedback,day:b.dataset.day});await refresh();}catch(x){showToast(x.message,true);}finally{b.disabled=false;}}
-function init(){
- if(!node('action-cards'))return;
- node('strong-alerts').addEventListener('click',feedback);
- node('action-refresh').addEventListener('click',refresh);
- for(const id of ['execution-mode','native-sound'])node(id).addEventListener('change',()=>{preferencesDirty=true;});
- node('save-execution').addEventListener('click',async()=>{try{const d=await api('/api/execution-preferences','PUT',{mode:node('execution-mode').value,native_sound:node('native-sound').checked});preferencesDirty=false;loadedPrefs=false;showToast(d.message);resetAlerts('设置已改变，等待重新核验');await refresh();}catch(e){showToast(e.message,true);}});
- node('enable-action-sound').addEventListener('click',async()=>{try{audio=audio||new (window.AudioContext||window.webkitAudioContext)();await audio.resume();sound=true;beep();node('action-sound-status').textContent='网页声音已启用：每条持续有效的提醒最多响3次，间隔至少60秒；已看到或失效立即停止。';}catch(e){showToast('浏览器未允许声音，请检查浏览器设置。',true);}});
- node('mute-action-sound').addEventListener('click',()=>{sound=false;node('action-sound-status').textContent='网页声音已关闭；桌面通知音效由上方独立设置。';});
- refresh();review();setInterval(refresh,10000);setInterval(review,60000);
- setInterval(()=>{if(lastSuccess&&Date.now()-lastSuccess>45000)resetAlerts('更新超过45秒，停止沿用旧行动卡。');},5000);
+
+function renderThreshold(item) {
+  const direction = item.direction === 'at_or_above' ? '≥' : '≤';
+  let detail = '等待有效报价';
+  if (Number.isFinite(item.distance)) {
+    detail = item.distance > 0 ? '还差 ' + price(item.distance) + ' 元' :
+      Number.isFinite(item.max_price) && -item.distance > item.max_price - item.price + 1e-8 ?
+        '已超过最高接受价' : '价格已到位';
+  }
+  return '<li><b>' + esc(item.label + ' ' + direction + ' ' + price(item.price)) +
+    '</b>' + (item.max_price == null ? '' : ' · 最高接受价 ' + price(item.max_price)) +
+    ' · ' + esc(detail) + '</li>';
+}
+
+function renderT(t) {
+  if (!t) return '';
+  const values = [];
+  if (t.cycle) {
+    values.push(metric('实际卖出均价', price(t.sell_price)), metric('尚未接回', quantity(t.remaining_quantity)));
+    if (t.buyback_cap != null) values.push(metric('接回最高参考价', price(t.buyback_cap)));
+  } else if (t.opening_price_floor != null) {
+    values.push(metric('分时均价', price(t.vwap)), metric('按成本推算的高抛参考门槛', price(t.opening_price_floor)));
+  }
+  if (t.minimum_spread != null) {
+    values.push(metric('至少需要的价差（元/股或份）', price(t.minimum_spread)),
+                metric('本次测算数量', quantity(t.break_even_quantity)));
+  }
+  const cost = t.minimum_gross == null ? '' :
+    '<p>毛价差门槛 ' + amount(t.minimum_gross) + '，其中往返费用测算 ' +
+    amount(t.estimated_roundtrip_fee) + '、滑点等缓冲 ' + amount(t.extra_cost_buffer) +
+    (t.fee_basis?.includes('reserve') ? '。至少一边费用暂按预留算。' : '。') + '</p>';
+  const distance = t.distance_to_cap > 0 ?
+    '<p>现价高于接回上限 ' + price(t.distance_to_cap) + ' 元，等待；尾盘不追价接回。</p>' : '';
+  const checks = (t.checks || []).map(check => check.detail).filter(detail => detail && detail !== t.reason);
+  return '<div class="action-t"><h4>做 T · ' + esc(t.status) + '</h4>' +
+    (values.length ? '<dl>' + values.join('') + '</dl>' : '') + cost + distance +
+    (t.reason ? '<p>' + esc(t.reason) + '</p>' : '') + list(checks) + '</div>';
+}
+
+function renderCard(card, open) {
+  const thresholds = card.thresholds || [];
+  const expireLocal = card.expires_at ? new Date(card.expires_at).toLocaleTimeString('zh-CN',
+    {timeZone:'Asia/Shanghai', hour12:false}) : '';
+  const context = [
+    card.quote_at && '报价时间 ' + new Date(card.quote_at).toLocaleTimeString('zh-CN', {timeZone:'Asia/Shanghai', hour12:false}),
+    expireLocal && '本轮核验有效至 ' + expireLocal,
+    card.plan?.valid_on && '计划有效日 ' + card.plan.valid_on
+  ].filter(Boolean).join(' · ');
+  return '<article class="action-card ' + esc(card.state) + '"><div class="action-heading"><strong>' +
+    esc(card.name) + ' ' + esc(card.code) + '</strong><b>' + esc(card.label) + '</b></div><p>' + esc(card.reason) +
+    '</p><dl>' + metric(card.side === 'sell' ? '卖出参考价' : '最新参考价', price(card.price)) +
+    metric('本次核验上限', quantity(card.quantity)) +
+    (card.available_quantity == null ? '' : metric('券商记录可卖', quantity(card.available_quantity))) +
+    (card.cash_after == null ? '' : metric('本笔后现金估算', amount(card.cash_after))) +
+    '</dl>' + (thresholds.length ? '<ul class="action-thresholds">' + thresholds.map(renderThreshold).join('') + '</ul>' : '') +
+    list(card.blockers || []) + (context ? '<p>' + esc(context) + '</p>' : '') +
+    (card.notification ? '<p class="action-notice">' + esc(card.notification) + '</p>' : '') +
+    renderT(card.t) + '<details data-card-code="' + esc(card.code) + '"' + (open ? ' open' : '') +
+    '><summary>有效期、失效条件与费用</summary>' +
+    (card.plan?.signal_date ? '<p>计划信号日 ' + esc(card.plan.signal_date) + '。</p>' : '') +
+    (card.fee != null ? '<p>费用预留 ' + amount(card.fee) + ' · ' + esc(card.fee_note) + '</p>' : '') +
+    list(card.cancel || []) + (card.inventory_at ? '<p>券商数量记录于 ' + esc(card.inventory_at) + '</p>' : '') +
+    '</details>' + (card.alert_id && card.quantity != null ? '<a href="/trade-reconcile?alert_id=' + encodeURIComponent(card.alert_id) +
+      '">登记实际成交</a>' : '') + '</article>';
+}
+
+function drawCards(data) {
+  node('action-status').textContent = (data.valid ? '盘中行情已核验' : data.pause_reason || '暂停实时提醒') +
+    (data.mode === 'exit_only' ? ' · 退出休息模式' : '');
+  node('action-note').textContent = (data.cash_floor == null ? '' :
+    '总仓规则对应现金至少 ' + amount(data.cash_floor) + '。') + data.note;
+  node('action-validation').textContent = data.validation_note;
+  node('action-desktop-status').textContent = [data.desktop_status, desktopTest].filter(Boolean).join('。');
+  if (!loadedPrefs && !preferencesDirty) {
+    node('execution-mode').value = data.preferences.mode;
+    node('native-sound').checked = data.preferences.native_sound;
+    loadedPrefs = true;
+  }
+  const container = node('action-cards');
+  const open = new Set([...container.querySelectorAll('details[open]')].map(item => item.dataset.cardCode));
+  container.innerHTML = data.cards.map(card => renderCard(card, open.has(card.code))).join('') || '<p>暂无行动卡。</p>';
+}
+
+function drawAlerts(data, allowSound = true) {
+  const active = data.valid ? (data.alerts || []).filter(alert =>
+    !['seen','deferred'].includes(alert.feedback?.action) &&
+    !['seen','deferred','partial'].includes(alert.status) && alert.native) : [];
+  node('strong-alerts').innerHTML = active.map(alert =>
+    '<article class="strong-alert ' + (alert.side === 'sell' ? 'sell' : alert.side === 'buy' ? 'buy' : 'risk') +
+    '"><div><strong>' + esc(alert.name) + ' · ' + esc(alert.kind) + '</strong><p>' + esc(alert.reason) +
+    '</p><span>' + (alert.side ? '参考价 ' + price(alert.price) + ' · 核验数量 ' + quantity(alert.quantity) : '请在行动卡核对条件') +
+    '</span></div><div class="action-buttons"><button data-id="' + esc(alert.id) + '" data-day="' + esc(alert.day) +
+    '" data-feedback="seen">已看到</button><button data-id="' + esc(alert.id) + '" data-day="' + esc(alert.day) +
+    '" data-feedback="deferred">暂不执行</button>' + (alert.side ?
+      '<a href="/trade-reconcile?alert_id=' + encodeURIComponent(alert.id) + '">登记成交</a>' : '') + '</div></article>'
+  ).join('');
+  if (!allowSound || !sound) return;
+  const now = Date.now();
+  const due = active.filter(alert => {
+    const previous = notices.get(alert.id) || {count:0, last:0};
+    return previous.count < 3 && now - previous.last >= 60000;
+  });
+  if (due.length && beep()) {
+    for (const alert of due) notices.set(alert.id, {count:(notices.get(alert.id)?.count || 0) + 1, last:now});
+    try { localStorage.setItem('hengshi_strong_alert_counts', JSON.stringify([...notices].slice(-250))); } catch {}
+  }
+}
+
+function expire(data, now) {
+  const elapsed = at => at != null && at <= now;
+  if (elapsed(data.deadline)) {
+    resetAlerts('行情、持仓或交易时段核验已过期，等待刷新。');
+    return false;
+  }
+  let changed = false;
+  for (const card of data.cards) {
+    const cardExpired = elapsed(card.deadline);
+    if (cardExpired) {
+      changed = true;
+      Object.assign(card, {deadline:null, expires_at:null, state:'paused', label:'行情或条件已过期',
+        reason:'等待新一轮行情与条件核验。', price:null, quantity:null, cash_after:null, fee:null,
+        side:null, alert_id:null, notification:null, blockers:[], quote_at:null});
+      for (const threshold of card.thresholds) threshold.distance = null;
+    }
+    if (card.t && (cardExpired || elapsed(card.t.deadline))) {
+      changed = true;
+      const {cycle, remaining_quantity, sell_price} = card.t;
+      card.t = {cycle, remaining_quantity, sell_price, status:'等待最新分时复核'};
+    }
+  }
+  const remaining = data.alerts.filter(alert => !elapsed(alert.deadline));
+  changed ||= remaining.length !== data.alerts.length;
+  data.alerts = remaining;
+  return changed;
+}
+
+async function refresh() {
+  if (busy) return;
+  busy = true;
+  const requested = Date.now(), version = generation;
+  try {
+    const data = await api('/api/action-center');
+    if (version !== generation) return;
+    // Anchor the server's remaining TTL to request start so network latency can
+    // shorten a card's lifetime but cannot extend it.
+    const deadline = at => at ? requested + Date.parse(at) - Date.parse(data.asof) : null;
+    data.deadline = deadline(data.expires_at);
+    for (const item of [...data.cards, ...data.alerts]) {
+      item.deadline = deadline(item.expires_at);
+      if (item.t) item.t.deadline = deadline(item.t.expires_at);
+    }
+    current = data;
+    expire(data, Date.now());
+    if (current) {
+      drawCards(data);
+      drawAlerts(data);
+    }
+  } catch (error) {
+    if (version === generation) resetAlerts('读取失败，暂停提醒。' + error.message);
+  } finally {
+    busy = false;
+  }
+}
+
+function checkExpiry() {
+  if (!current) return;
+  if (expire(current, Date.now()) && current) {
+    drawCards(current);
+    drawAlerts(current, false);
+  }
+}
+
+async function review() {
+  try {
+    const data = await api('/api/t-performance'), summary = data.summary;
+    node('t-performance-summary').innerHTML = '<div class="action-metrics"><span>实际配对净收益 <b>' +
+      amount(summary.actual_paired_net) + '</b></span><span>费用待补的估算 <b>' +
+      amount(summary.estimated_paired_net) + '</b></span><span>已结束且费用完整样本 <b>' +
+      esc(summary.closed_actual_samples ?? 0) + '</b></span></div><p>' + (data.notes || []).map(esc).join('；') +
+      '</p><p>统计窗口 ' + esc(data.window_start) + ' 至 ' + esc(data.window_end) +
+      '。未接回部分的持有对比：' + amount(summary.unmatched_mark_comparison) + '（独立估算，非已实现T收益）。</p>';
+  } catch (error) {
+    node('t-performance-summary').textContent = '复盘暂不可用：' + error.message;
+  }
+}
+
+async function feedback(event) {
+  const button = event.target.closest('[data-feedback]');
+  if (!button) return;
+  button.disabled = true;
+  try {
+    await api('/api/action-feedback/' + encodeURIComponent(button.dataset.id), 'POST',
+      {action:button.dataset.feedback, day:button.dataset.day});
+    if (current) {
+      current.alerts = current.alerts.filter(alert => alert.id !== button.dataset.id);
+      drawAlerts(current, false);
+    }
+    await refresh();
+  } catch (error) {
+    showToast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function soundStatus() {
+  node('action-sound-status').textContent = !sound ? '网页声音已关闭，可点击试听。' :
+    audio.state === 'running' ? '网页声音已启用，有效强提醒最多响 3 次，间隔至少 60 秒。' :
+      '网页声音暂不可用，请重新点击试听或检查浏览器的音频权限。';
+}
+
+function init() {
+  if (!node('action-cards')) return;
+  node('strong-alerts').addEventListener('click', feedback);
+  node('action-refresh').addEventListener('click', refresh);
+  for (const id of ['execution-mode','native-sound']) node(id).addEventListener('change', () => { preferencesDirty = true; });
+  node('save-execution').addEventListener('click', async () => {
+    try {
+      const result = await api('/api/execution-preferences', 'PUT',
+        {mode:node('execution-mode').value, native_sound:node('native-sound').checked});
+      preferencesDirty = false;
+      loadedPrefs = false;
+      showToast(result.message);
+      generation++;
+      resetAlerts('设置已改变，等待重新核验。');
+      await refresh();
+    } catch (error) { showToast(error.message, true); }
+  });
+  node('enable-action-sound').addEventListener('click', async () => {
+    try {
+      if (!audio || audio.state === 'closed') {
+        audio = new (window.AudioContext || window.webkitAudioContext)();
+        audio.onstatechange = soundStatus;
+      }
+      await audio.resume();
+      sound = true;
+      if (!beep()) throw Error('声音暂不可用');
+      soundStatus();
+    } catch {
+      sound = false;
+      node('action-sound-status').textContent = '试听失败，请检查浏览器是否允许播放声音。';
+    }
+  });
+  node('mute-action-sound').addEventListener('click', () => { sound = false; soundStatus(); });
+  node('test-action-desktop').addEventListener('click', async event => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    node('action-desktop-status').textContent = '正在测试桌面通知…';
+    try { desktopTest = (await api('/api/action-desktop-test', 'POST')).message; }
+    catch (error) { desktopTest = error.message; }
+    finally {
+      node('action-desktop-status').textContent = [current?.desktop_status, desktopTest].filter(Boolean).join('。');
+      button.disabled = false;
+    }
+  });
+  refresh();
+  review();
+  setInterval(refresh, 10000);
+  setInterval(review, 60000);
+  setInterval(checkExpiry, 1000);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+      checkExpiry();
+      refresh();
+    }
+  });
 }
 document.addEventListener('DOMContentLoaded',init);
 })();

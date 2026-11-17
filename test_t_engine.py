@@ -115,6 +115,18 @@ class TEngineTests(unittest.TestCase):
             elif change=='small':a['ledger']['cycles'][0]['buyback_quantity']=50
             else:a['ledger']['cycles'][0]['date']='2026-11-10'
             self.assertEqual(self.call(**a)['signals'],[],change)
+    def test_buyback_band_uses_actual_sell_cost_and_only_unmatched_quantity(self):
+        args=self.buyback_fixture()
+        args['cfg']['positions'][0]['quantity']=300
+        args['ledger']['cycles'][0].update(quantity=300,buyback_quantity=180,base_quantity=420,sell_fee=90)
+        args['ledger']['fee_model']={'stock':{'commission_per_10k':5,'minimum_commission':5}}
+        row=self.call(**args)['rows'][0]
+        self.assertEqual(row['remaining_quantity'],120)
+        self.assertEqual(row['break_even_quantity'],100)
+        self.assertEqual(row['fee_basis'],['actual_sell','broker_terms'])
+        self.assertEqual(row['estimated_roundtrip_fee'],35.03)
+        self.assertEqual(row['minimum_spread'],.71)
+        self.assertEqual(row['target_buy'],20.29)
     def test_closed_cycle_and_late_day_do_not_restart(self):
         book=deepcopy(self.ledger);book['cycles']=[{'code':self.code,'date':'2026-11-11','status':'cash'}]
         self.assertEqual(self.call(ledger=book)['rows'][0]['phase'],'closed')

@@ -606,6 +606,28 @@ def create_app(folder:Path=ROOT):
                               'blockers':list(dict.fromkeys(row.get('blockers',[])+['当前盘中快照未核验']))} for row in payload.get('rows',[])]
         return jsonify(payload)
 
+    def notification_status(row):
+        if row is None:
+            return '已触发，等待后台登记提醒'
+        status = row['status']
+        handled = {'seen': '你已看到提醒', 'deferred': '已选择暂不执行',
+                   'partial': '已登记部分成交', 'filled': '已登记成交', 'linked': '已关联成交'}
+        if status in handled:
+            return handled[status]
+        if not row.get('active'):
+            return '上一条提醒已失效，等待重新核验'
+        if not row.get('native'):
+            return '仅显示条件观察'
+        result = row.get('notification') or {}
+        outcome = result.get('outcome')
+        if outcome == 'failed':
+            return '桌面通知提交失败，查看页面提醒'
+        if outcome in ('sending', 'unknown'):
+            return '桌面通知送达状态待确认'
+        if result.get('submitted'):
+            return '桌面提醒已提交给系统'
+        return '条件已触发，桌面通知尚未提交'
+
     @app.route('/api/action-center')
     def action_center_api():
         from action_center import build_actions
@@ -616,19 +638,55 @@ def create_app(folder:Path=ROOT):
             book=t_runtime.ledger(output,cfg)
             payload=build_actions(cfg,state,book)
             journal=load_journal(output,cfg.get('reconciled_trades',[]))
-        ids={s['id'] for s in payload['signals']}
-        payload['alerts']=[r for r in journal['rows'] if r['id'] in ids and r.get('active',True)
-                           and r.get('status') not in ('filled','linked','expired','inactive')]
-        live_by_id={s['id']:s for s in payload['signals']}
-        cards_by_id={c['alert_id']:c for c in payload['cards'] if c['alert_id']}
-        for row in payload['alerts']:
-            current=live_by_id[row['id']];card=cards_by_id.get(row['id'])
-            row.update(price=current.get('price'),level=current.get('level'),reason=current.get('reason'),
-                       quantity=card.get('quantity') if card else None)
-        payload['preferences']={'mode':payload['mode'],
-            'native_sound':(cfg.get('execution_preferences') or {}).get('native_sound') is True}
+        live_by_id = {signal['id']: signal for signal in payload['signals']}
+        cards_by_id = {card['alert_id']: card for card in payload['cards'] if card['alert_id']}
+        relevant = {ident for ident, signal in live_by_id.items() if signal['code'] == 'PORT'} | cards_by_id.keys()
+        archived = {row['id']: row for row in journal['rows'] if row['id'] in relevant}
+        payload['alerts'] = []
+        for ident, card in cards_by_id.items():
+            card['notification'] = notification_status(archived.get(ident))
+        for ident, row in archived.items():
+            if not row['active'] or row['status'] in ('filled', 'linked', 'expired', 'inactive'):
+                continue
+            current = live_by_id[ident]
+            card = cards_by_id.get(ident)
+            row.update(price=current.get('price'), level=current.get('level'), reason=current.get('reason'),
+                       quantity=card.get('quantity') if card else None,
+                       expires_at=(card or payload)['expires_at'])
+            if card and card['quantity'] is None:
+                row['side'] = None
+                if current.get('category') in ('t', 'add'):
+                    row['native'] = False
+            payload['alerts'].append(row)
+        enabled = state.get('desktop_notifications_enabled')
+        payload['preferences'] = {'mode': payload['mode'],
+            'native_sound': (cfg.get('execution_preferences') or {}).get('native_sound') is True}
+        payload['desktop_status'] = ('后台桌面通知已开启' if enabled is True else
+                                     '后台桌面通知未开启' if enabled is False else '后台桌面通知状态未上报')
+        errors = state.get('errors') or []
+        if any(message.startswith('提醒记录保存失败') for message in errors if isinstance(message, str)):
+            payload['desktop_status'] = '提醒记录保存失败，请检查后台运行状态'
         payload['validation_note']='软件运行测试不等于策略盈利验证；实际成交、样本外回测与费用证据不足时，策略保持待验证。'
         return jsonify(payload)
+
+    desktop_test_at = None
+
+    @app.route('/api/action-desktop-test', methods=['POST'])
+    def action_desktop_test():
+        from intraday_monitor import native_notice
+        nonlocal desktop_test_at
+        with WRITE_LOCK:
+            now = time.monotonic()
+            if desktop_test_at is not None and now - desktop_test_at < 10:
+                return jsonify(error='请间隔10秒再测试桌面通知'), 429
+            desktop_test_at = now
+            sound = (config().get('execution_preferences') or {}).get('native_sound') is True
+        submitted = native_notice({'name': '衡势', 'kind': '桌面提醒测试', 'sound': sound, 'test': True})
+        if submitted is True:
+            return jsonify(message='测试通知已提交给系统，请确认是否弹出。')
+        if submitted is None:
+            return jsonify(error='通知测试超时，请检查系统通知或稍后重试'), 503
+        return jsonify(error='本机未能提交桌面通知，请检查系统通知设置'), 503
 
     @app.route('/api/action-feedback/<ident>',methods=['POST'])
     def action_feedback(ident):

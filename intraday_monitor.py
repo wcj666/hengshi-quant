@@ -239,7 +239,8 @@ def dedup_events(events,day, *, demo):
 
 def native_notice(e):
     if platform.system()!='Darwin':return False
-    msg=f"{e['name']} {e['kind']}：价格/回撤 {e['price']}；参考位 {e['level']}，请核对券商行情"
+    msg = ('盘中提醒测试' if e.get('test') else
+           f"{e['name']} {e['kind']}：价格/回撤 {e['price']}；参考位 {e['level']}，请核对券商行情")
     applescript='display notification '+json.dumps(msg,ensure_ascii=False)+' with title "A股盘中监控：非委托"'
     if e.get('sound') is True:applescript+=' sound name "Glass"'
     try:
@@ -299,6 +300,7 @@ def single_cycle(*,mode,notify=False,force_demo=False,probe=False,interval=10):
     state={'mode':mode,'market_time':now.isoformat(timespec='seconds'),'updated_at':dt.datetime.now(dt.timezone.utc).isoformat(),
            'config_hash':cfg_hash,
            'interval_seconds':interval,'market_session':bool(market_open),'calendar_ok':cal_ok,
+           'desktop_notifications_enabled':bool(notify and not demo and not probe and platform.system()=='Darwin'),
            'calendar_info':cal_msg,'source_timestamp_verified':False,
            'data_source':'演示模拟' if demo else QUOTE_SOURCE,
            'status':'休市或非交易时段，已暂停抓取','quotes':[],'alerts':[],'risk':None,'errors':[],

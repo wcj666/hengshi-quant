@@ -41,13 +41,13 @@ def _build_v1_signals(cfg, quotes, risk, *, trading_day, market_session, calenda
         return []
     rows = []
     held = {str(p['code']).zfill(6): p for p in cfg.get('positions', []) if int(p.get('quantity', 0)) > 0}
-    def emit(category, code, trigger, level, price, title, reason, shares=None, priority='normal'):
+    def emit(category, code, trigger, level, price, title, reason, shares=None, priority='normal', blockers=None):
         level = _num(level) or 0.0
         ident = hashlib.sha256(f'{trading_day}|{category}|{code}|{trigger}|{level:.4f}'.encode()).hexdigest()[:20]
         rows.append({'id': ident, 'category': category, 'code': code,
                      'name': quotes.get(code, {}).get('name', held.get(code, {}).get('name', '全账户')),
                      'title': title, 'reason': reason, 'trigger': trigger, 'price': price,
-                     'level': level, 'priority': priority, 'shares': shares,
+                     'level': level, 'priority': priority, 'shares': shares, 'blockers': blockers or [],
                      'held': code in held, 'day': str(trading_day),
                      'data_note': 'V1规则复核；可卖数量、T+1和成交均须在券商核验；提醒不是委托。'})
     for code, position in held.items():
@@ -74,7 +74,8 @@ def _build_v1_signals(cfg, quotes, risk, *, trading_day, market_session, calenda
         if review.get('blockers'):
             reason += ' ' + '；'.join(review['blockers'])
         emit('reduce', code, trigger or 'exit_review', level, price, '量价结构观察' if review.get('action')=='review' else 'V1退出复核', reason,
-             shares=review.get('quantity'), priority='high' if trigger in ('stop', 'time_10', 'time_5') else 'normal')
+             shares=review.get('quantity'), priority='high' if trigger in ('stop', 'time_10', 'time_5') else 'normal',
+             blockers=review.get('blockers'))
     for event in tier_alerts(risk):
         pressure = event['kind'] == '持仓压力损失超剩余预算'
         emit('reduce', 'PORT', 'portfolio_stress' if pressure else f'account_budget_{event["tier"]}',
