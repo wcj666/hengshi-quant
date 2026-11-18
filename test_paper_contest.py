@@ -2,7 +2,7 @@
 from copy import deepcopy
 from datetime import datetime
 import unittest
-from paper_contest import initialize,execute,observe,fees,sellable,validate_state,CN
+from paper_contest import initialize,execute,observe,fees,sellable,validate_state,preview_trade,CN
 
 DAYS=['2026-11-12','2026-11-13','2026-11-16','2026-11-17','2026-11-18','2026-11-19','2026-11-20']
 
@@ -109,6 +109,43 @@ class PaperContestTests(unittest.TestCase):
 
     def test_etf_fee_model_has_no_stock_stamp_or_transfer(self):
         state=account();self.assertEqual(fees(state,'etf','sell',10000),{'commission':5.,'stamp_tax':0.,'transfer':0.,'total':5.})
+
+    def test_preview_sell_uses_same_fill_cost_and_inventory_without_writing_trade(self):
+        holding = {'code':'600406','name':'测试证券','type':'stock','quantity':200,'available_quantity':100,
+                   'cost':15.,'screenshot_price':10.,'market_value':2000.}
+        state = account([holding])
+        now = datetime(2026, 11, 13, 10, tzinfo=CN)
+        quotes = {'600406': quote(now)}
+        original = deepcopy(state)
+        preview = preview_trade(state, '600406', 'sell', 100, quotes, now, '模拟减仓预览')
+        self.assertEqual(state, original)
+        self.assertTrue(preview['allowed'])
+        self.assertEqual(preview['fillable_quantity'], 100)
+        self.assertEqual((preview['position_before'], preview['position_after']), (200, 100))
+        self.assertEqual((preview['sellable_before'], preview['sellable_after']), (100, 0))
+        actual = execute(state, '600406', 'sell', 100, quotes, now, '模拟减仓')
+        self.assertEqual((preview['price'], preview['fee']), (actual['price'], actual['fee']))
+        self.assertEqual(preview['cash_after'], state['cash'])
+        self.assertEqual(preview['quote_asof'], actual['source_timestamp'])
+        self.assertEqual(preview['realized_contest_pnl'], actual['net_realized_contest_pnl'])
+
+    def test_preview_buy_shows_t_plus_one_and_stale_or_incomplete_quotes_are_rejected(self):
+        state = account()
+        plan(state)
+        now = datetime(2026, 11, 13, 10, tzinfo=CN)
+        original = deepcopy(state)
+        preview = preview_trade(state, '600406', 'buy', 800, {'600406':quote(now)}, now, '模拟买入预览')
+        self.assertTrue(preview['allowed'])
+        self.assertEqual(preview['position_after'], 800)
+        self.assertEqual(preview['sellable_after'], 0)
+        for changes, error in [({'source_timestamp':'2026-11-13T09:50:00+08:00'}, '源报价超过90秒'),
+                               ({'ask1':None}, '最优档盘口价格'), ({'ask1_shares':100}, '最优档10%')]:
+            blocked = preview_trade(state, '600406', 'buy', 800, {'600406':{**quote(now), **changes}}, now, '模拟预览')
+            self.assertFalse(blocked['allowed'])
+            self.assertEqual(blocked['fillable_quantity'], 0)
+            self.assertIn(error, blocked['error'])
+            self.assertNotIn('cash_after', blocked)
+        self.assertEqual(state, original)
 
     def test_closing_mark_requires_observed_today_close(self):
         p={'code':'600406','name':'测试证券','type':'stock','quantity':100,'available_quantity':100,

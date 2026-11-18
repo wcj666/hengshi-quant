@@ -106,6 +106,13 @@ def validate_state(state):
         raise ValueError('现金、股数与完整虚拟成交流水不一致')
 
 
+def _quote_number(quote, key, message, minimum=.000001):
+    try:
+        return number(quote.get(key), minimum)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(message) from None
+
+
 def _source(quote,now,*,closing=False):
     from quote_health import parse_provider_time
     stamp=parse_provider_time(quote.get('source_timestamp'))
@@ -114,7 +121,7 @@ def _source(quote,now,*,closing=False):
     if closing:
         if now.time()<time(15,5) or stamp.astimezone(CN).time()<time(15):raise ValueError('完整收盘价尚未核验')
     elif (now.astimezone(timezone.utc)-stamp).total_seconds()>90:raise ValueError('源报价超过90秒')
-    number(quote.get('price'),.000001)
+    _quote_number(quote, 'price', '缺少有效的最新成交价')
     return stamp
 
 
@@ -154,7 +161,7 @@ def _session(state,now,side):
     day=str(now.date())
     if now.weekday()>=5 or not state['start']<=day<=state['end'] or day not in state['calendar']:raise ValueError('不在比赛工作日交易日期内，禁止成交')
     if not (time(9,45)<=now.time()<time(11,30) or time(13)<=now.time()<time(14,57)):
-        raise ValueError('仅9:45后连续竞价时段模拟成交')
+        raise ValueError('模拟成交时段为 9:45–11:30、13:00–14:57（北京时间）')
     if side=='buy' and now.time()>=time(14,45):raise ValueError('14:45后不新增')
 
 
@@ -182,15 +189,21 @@ def execute(state,code,side,quantity,quotes,now,reason):
     if side=='buy' and (not q.get('name') or 'ST' in q['name'].upper() or '退' in q['name']):
         raise ValueError('证券实时名称未核验或有风险警示，不新开仓')
     if qty%100 and not (side=='sell' and old and qty==old['quantity']):raise ValueError('按100股/份整数手执行')
-    upper=number(q.get('upper_limit'),.000001);lower=number(q.get('lower_limit'),.000001)
-    if q.get('limit_status_verified') is not True or not lower<upper:raise ValueError('涨跌停范围未核验')
+    if q.get('limit_status_verified') is not True:raise ValueError('涨跌停范围未核验')
+    upper = _quote_number(q, 'upper_limit', '涨停价未核验')
+    lower = _quote_number(q, 'lower_limit', '跌停价未核验')
+    if not lower<upper:raise ValueError('涨跌停范围未核验')
     if side=='buy' and (q['price']>=upper or q.get('at_limit_up')):raise ValueError('涨停不假定买得到')
     if side=='sell' and (q['price']<=lower or q.get('at_limit_down')):raise ValueError('跌停不假定卖得出')
     key='ask1' if side=='buy' else 'bid1'
-    reference=number(q.get(key),.000001);book=number(q.get(key+'_shares'),1)
+    reference = _quote_number(q, key, '缺少有效的最优档盘口价格')
+    book = _quote_number(q, key + '_shares', '缺少有效的最优档可见数量', minimum=1)
     if q.get('bid1') and q.get('ask1') and q['bid1']>q['ask1']:raise ValueError('盘口倒挂')
-    if not lower<=reference<=upper or qty>math.floor(book*state['fees']['book_fraction']):
-        raise ValueError('盘口价格无效或超过最优档10%可见数量，不假定成交')
+    if not lower <= reference <= upper:
+        raise ValueError('盘口价格超出已核验涨跌停范围')
+    depth_cap = math.floor(book * state['fees']['book_fraction'])
+    if qty > depth_cap:
+        raise ValueError(f'超过最优档10%可见数量，本次盘口上限 {depth_cap:,} 股/份')
     tick=Decimal('.001') if item['type']=='etf' else Decimal('.01')
     raw=Decimal(str(reference))*(Decimal(1)+Decimal(str(state['fees']['slippage_rate']))*(1 if side=='buy' else -1))
     price=float((raw/tick).to_integral_value(rounding=ROUND_CEILING if side=='buy' else ROUND_FLOOR)*tick)
@@ -253,6 +266,46 @@ def execute(state,code,side,quantity,quotes,now,reason):
             if len(state['closed_trades'])>=3 and all(t['net_pnl']<0 for t in state['closed_trades'][-3:]):state['paused']=True
     state['trades'].append(trade)
     return trade
+
+
+def preview_trade(state, code, side, quantity, quotes, now, reason):
+    """Project one requested fill using current execution rules on a copy."""
+    holding = state['positions'].get(code)
+    preview = {
+        'allowed': False,
+        'code': code,
+        'side': side,
+        'requested_quantity': quantity,
+        'fillable_quantity': 0,
+        'checked_at': now.isoformat(),
+        'cash_before': state['cash'],
+        'position_before': holding['quantity'] if holding else 0,
+        'sellable_before': sellable(holding, now) if holding else 0,
+    }
+    projected = deepcopy(state)
+    try:
+        fill = execute(projected, code, side, quantity, quotes, now, reason)
+    except ValueError as error:
+        return {**preview, 'error': str(error)}
+    holding_after = projected['positions'].get(code)
+    return {
+        **preview,
+        'allowed': True,
+        'name': fill['name'],
+        'fillable_quantity': fill['quantity'],
+        'quote_asof': fill['source_timestamp'],
+        'price': fill['price'],
+        'reference_book_price': fill['reference_book_price'],
+        'notional': money(fill['price'] * fill['quantity']),
+        'fee': fill['fee'],
+        'slippage_estimate': fill['slippage_estimate'],
+        'cash_after': projected['cash'],
+        'cash_delta': money(projected['cash'] - state['cash']),
+        'position_after': holding_after['quantity'] if holding_after else 0,
+        'sellable_after': sellable(holding_after, now) if holding_after else 0,
+        'realized_contest_pnl': fill.get('net_realized_contest_pnl'),
+        'reason': fill['reason'],
+    }
 
 
 def fetch_quotes(state):

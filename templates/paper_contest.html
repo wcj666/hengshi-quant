@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>模拟持仓 · 衡势</title><link rel="icon" href="/static/hengshi-logo.svg"><link rel="stylesheet" href="/static/paper_contest.css"><script src="/static/paper_contest.js" defer></script>{% include '_live_reminder_assets.html' %}</head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>模拟持仓 · 衡势</title><link rel="icon" href="/static/hengshi-logo.svg"><link rel="stylesheet" href="/static/paper_contest.css?v=2"><script src="/static/paper_contest.js?v=2" defer></script>{% include '_live_reminder_assets.html' %}</head>
 <body><main>
 <header><div class="brand"><img src="/static/hengshi-logo.svg" alt="衡势"><div><span class="eyebrow">衡势 · 一周模拟比赛</span><h1>我的模拟持仓</h1></div></div><div class="actions"><a href="/">返回研究台</a><button id="refresh" type="button">刷新行情</button></div></header>
 <div class="intro"><p><strong>独立虚拟账户</strong> · 初始资金和持仓照录开赛截图，之后独立模拟操作。</p><span id="period">读取比赛日期…</span></div>
@@ -14,8 +14,32 @@
 <article><span>虚拟成交记录</span><strong id="trade-count">—</strong><small id="drawdown">—</small></article>
 </section>
 <section class="panel"><div class="panel-head"><div><h2>当前模拟持仓</h2><p>逐只当日盈亏按行情昨收、当日虚拟成交和费用计算。账户当日盈亏也包含已清仓证券。</p></div><span id="holding-count" class="tag">—</span></div>
-<div class="scroll"><table><thead><tr><th>证券</th><th>数量 / 可卖</th><th>账面成本</th><th>估值价 / 市值</th><th>当日盈亏</th><th>持仓比赛盈亏</th><th>固定止损</th></tr></thead><tbody id="holdings"><tr><td colspan="7">账本加载中…</td></tr></tbody></table></div>
+<div class="scroll"><table><thead><tr><th>证券</th><th>数量 / 可卖</th><th>账面成本</th><th>估值价 / 市值</th><th>当日盈亏</th><th>持仓比赛盈亏</th><th>固定止损</th><th>操作</th></tr></thead><tbody id="holdings"><tr><td colspan="8">账本加载中…</td></tr></tbody></table></div>
+</section>
+<section class="panel operation" id="paper-operation" aria-labelledby="paper-operation-title">
+<div class="panel-head"><div><h2 id="paper-operation-title">模拟买卖</h2><p>先核验盘口与数量，确认后记入本次比赛账本。</p></div><span class="tag">虚拟账户</span></div>
+<div class="operation-content">
+<p id="paper-session" class="operation-hint">正在读取操作状态…</p>
+<form id="paper-order-form">
+<div class="order-fields">
+<label>方向<select id="paper-side" name="side"><option value="sell">模拟卖出</option><option value="buy">模拟买入</option></select></label>
+<label>证券代码<input id="paper-code" name="code" type="text" list="paper-securities" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="输入六位代码" autocomplete="off" required><datalist id="paper-securities"></datalist></label>
+<label>数量（股／份）<input id="paper-quantity" name="quantity" type="number" min="1" step="1" required></label>
+<button id="paper-fill-sellable" class="holding-action fill-sellable" type="button" hidden>填入可卖量</button>
+</div>
+<p id="paper-inventory" class="operation-hint">选择证券后显示持仓和可卖数量。</p>
+<label class="reason-field">操作依据<textarea id="paper-reason" name="reason" placeholder="例如：仓位过重，按计划分批减仓" rows="2" maxlength="300" required></textarea></label>
+<div class="operation-actions"><button class="operation-primary" id="paper-preview-button" type="submit" disabled>预览模拟成交</button></div>
+</form>
+<p id="paper-order-status" class="operation-status" role="status" hidden></p>
+<section id="paper-preview" class="order-preview" aria-labelledby="paper-preview-title" hidden>
+<div class="preview-head"><h3 id="paper-preview-title" tabindex="-1">成交预览</h3><small id="paper-preview-expiry"></small></div>
+<dl id="paper-preview-details"></dl>
+<p id="paper-preview-note" class="operation-hint"></p>
+<button class="operation-confirm" id="paper-confirm-button" type="button">确认模拟成交</button>
+</section>
+</div>
 </section>
 <section class="panel"><div class="panel-head"><div><h2>虚拟成交</h2><p>只记录实际巡检时取得有效盘口的估计成交，非券商成交回报。</p></div></div><div class="scroll"><table><thead><tr><th>时间</th><th>证券</th><th>方向 / 数量</th><th>估计成交价</th><th>费用 / 额外滑点</th><th>依据</th></tr></thead><tbody id="trades"><tr><td colspan="6">—</td></tr></tbody></table></div></section>
-<section class="foot"><p id="costs">—</p><p id="opening">—</p><p>交易时段后台每30秒取价，页面每15秒更新显示；“刷新行情”主动请求一次取价，同样受30秒频率限制。仅在已核验的比赛工作日运行，午间、周末休市。自动取价不会自动生成交易；虚拟买卖按策略巡检、盘口和可卖数量核验。Mac需运行软件并保持联网。</p></section>
+<section class="foot"><p id="costs">—</p><p id="opening">—</p><p>后台在比赛交易时段每30秒取价，页面每15秒更新显示。“刷新行情”可主动请求取价，同样受30秒频率限制。Mac需运行软件并保持联网。</p></section>
 </main></body></html>

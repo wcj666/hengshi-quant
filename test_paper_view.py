@@ -1,12 +1,14 @@
-"""Read-only paper page/API must not mutate ledgers or expose real config."""
+"""Paper API, freshness, and separation from real account data."""
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta
+import time
 from paper_contest import initialize,observe,execute,money,CN
 from paper_view import load_snapshot
-from web_dashboard import create_app
+from web_dashboard import CSRF, create_app
 
 
 class PaperViewTests(unittest.TestCase):
@@ -102,6 +104,86 @@ class PaperViewTests(unittest.TestCase):
 
     def test_foreign_host_is_rejected(self):
         self.assertEqual(self.client.get('/api/paper-contest',headers={'Host':'foreign.example'}).status_code,403)
+
+    def sell_request(self):
+        return {'code':'600406','side':'sell','quantity':100,'reason':'合成测试减仓'}
+
+    def live_book(self, now, bid=9.79):
+        return {'600406':{'price':9.8,'previous_close':10.,'source_timestamp':now.isoformat(),
+                         'upper_limit':11.,'lower_limit':9.,'limit_status_verified':True,
+                         'bid1':bid,'bid1_shares':1100,'ask1':9.8}}, []
+
+    def operation(self, step, data, *, secure=True):
+        headers = {'X-CSRF-Token': CSRF} if secure else {}
+        return self.client.post('/api/paper-contest/trade/'+step, json=data, headers=headers)
+
+    def test_web_preview_and_confirmation_are_separate_and_repeat_safe(self):
+        now = datetime(2026,11,13,10,tzinfo=CN)
+        body = self.sell_request()
+        config = (self.root/'config.json').read_bytes()
+        before = self.file.read_bytes()
+        with patch('paper_contest.clock_now', return_value=now), patch('paper_contest.fetch_quotes', return_value=self.live_book(now)) as fetch:
+            self.assertEqual(self.operation('preview', body, secure=False).status_code,403)
+            response = self.operation('preview', body)
+            self.assertEqual(response.status_code,200,response.get_json())
+            preview = response.json['preview']
+            self.assertEqual(preview['position_after'],100)
+            self.assertGreater(preview['cash_after'],self.state['cash'])
+            self.assertEqual(preview['fee_total'],preview['fee']['total'])
+            self.assertEqual(self.file.read_bytes(),before)
+            confirm = {'token':response.json['token'],'trade':body}
+            self.assertEqual(self.operation('confirm', confirm, secure=False).status_code,403)
+            # Periodic valuation between preview and confirmation is compatible.
+            observe(self.state,self.live_book(now)[0],now)
+            self.file.write_text(json.dumps(self.state))
+            saved = self.operation('confirm', confirm)
+            self.assertEqual(saved.status_code,200,saved.get_json())
+            self.assertEqual(saved.json['snapshot']['positions'][0]['sellable'],0)
+            self.assertEqual(saved.json['snapshot']['trade_count'],1)
+            duplicate = self.operation('confirm',confirm)
+            self.assertTrue(duplicate.json['repeated'])
+            self.assertEqual(duplicate.json['trade']['sequence'],1)
+            self.assertEqual(fetch.call_count,2)
+        self.assertEqual(len(json.loads(self.file.read_text())['trades']),1)
+        self.assertEqual((self.root/'config.json').read_bytes(),config)
+
+    def test_worse_quote_changed_inventory_and_expired_preview_never_save_a_fill(self):
+        now = datetime(2026,11,13,10,tzinfo=CN)
+        body = self.sell_request()
+        before = self.file.read_bytes()
+        with patch('paper_contest.clock_now', return_value=now), patch('paper_contest.fetch_quotes', side_effect=[self.live_book(now),self.live_book(now,bid=9.70)]) as fetch:
+            preview = self.operation('preview',body).json
+            request = {'token':preview['token'],'trade':body}
+            changed = self.operation('confirm',{**request,'trade':{**body,'reason':'另一项操作'}})
+            self.assertEqual(changed.status_code,409)
+            with patch('itsdangerous.timed.time.time',return_value=time.time()+40):
+                expired = self.operation('confirm',request)
+            self.assertEqual(expired.status_code,409)
+            self.assertEqual(fetch.call_count,1)
+            worse = self.operation('confirm',request)
+            self.assertEqual(worse.status_code,409)
+            self.assertIn('劣于预览',worse.json['error'])
+            self.assertEqual(self.file.read_bytes(),before)
+            self.state['positions']['600406']['opening_available']=0
+            self.file.write_text(json.dumps(self.state))
+            changed = self.operation('confirm',request)
+            self.assertEqual(changed.status_code,409)
+            self.assertIn('账本已变化',changed.json['error'])
+            self.assertEqual(fetch.call_count,2)
+            self.assertEqual(json.loads(self.file.read_text())['trades'],[])
+
+    def test_session_gate_rejects_before_network_and_shows_tail_cutoffs(self):
+        body = self.sell_request()
+        now = datetime(2026,11,13,9,40,tzinfo=CN)
+        with patch('paper_contest.clock_now',return_value=now), patch('paper_contest.fetch_quotes') as fetch:
+            denied = self.operation('preview',body)
+            self.assertEqual(denied.status_code,400)
+            fetch.assert_not_called()
+        self.assertFalse(load_snapshot(self.store,now)['trading']['session_open'])
+        late = load_snapshot(self.store,now.replace(hour=14,minute=45))['trading']
+        self.assertTrue(late['sell_allowed'])
+        self.assertFalse(late['buy_allowed'])
+        self.assertFalse(load_snapshot(self.store,now.replace(hour=14,minute=57))['trading']['session_open'])
 
 
 if __name__=='__main__':unittest.main()

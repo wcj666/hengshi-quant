@@ -2,7 +2,7 @@
 from datetime import datetime
 import json
 from pathlib import Path
-from paper_contest import CN, validate_state, sellable, money
+from paper_contest import CN, validate_state, sellable, money, _session
 from pnl_engine import valid_price
 from quote_health import parse_provider_time
 
@@ -46,6 +46,29 @@ def daily_position_pnl(row, previous_close, trade_totals):
     if opening_quantity < 0 or (opening_quantity and previous_close is None):
         return None
     return money(row['value'] - opening_quantity * (previous_close or 0) + cash)
+
+
+def trading_status(state, now, rows):
+    try:
+        _session(state, now, 'sell')
+    except ValueError as error:
+        return {'session_open': False, 'buy_allowed': False, 'sell_allowed': False,
+                'session_reason': str(error)}
+
+    buy_reason = None
+    try:
+        _session(state, now, 'buy')
+    except ValueError as error:
+        buy_reason = str(error)
+    if buy_reason is None:
+        if state['paused']:
+            buy_reason = '模拟账户已暂停新增，仍可复核卖出'
+        elif not any(code not in state['positions'] and plan.get('valid_on') == str(now.date())
+                     and plan.get('setup_verified') is True for code, plan in state['plans'].items()):
+            buy_reason = '今天没有通过准备核验的新增计划'
+    sell_allowed = any(row['sellable'] > 0 for row in rows)
+    return {'session_open': True, 'buy_allowed': buy_reason is None, 'buy_reason': buy_reason,
+            'sell_allowed': sell_allowed, 'sell_reason': None if sell_allowed else '当前没有已核对的可卖份额'}
 
 
 def load_snapshot(store,now=None):
@@ -120,6 +143,7 @@ def load_snapshot(store,now=None):
             'exposure':exposure,'exposure_pct':round(exposure/state['last_equity']*100,2) if exposure is not None else None,
             'maximum_drawdown':state['maximum_drawdown'],'paused':state['paused'],
             'positions':rows,'trade_count':len(state['trades']),'trades':state['trades'][-100:],
+            'trading':trading_status(state,now,rows), 'universe':state['universe'],
             'refresh':read_status(store),'phase':phase,'phase_message':phase_message,
             'fees':state['fees'],'notes':state['notes'],
             'opening_broker_total_pnl':opening.get('broker_total_pnl'),

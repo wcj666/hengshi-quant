@@ -1,4 +1,4 @@
-"""Local-only A-share research dashboard. No broker API, no trade execution."""
+"""Local A-share research dashboard and independent simulated trading."""
 from __future__ import annotations
 import argparse
 import csv
@@ -95,6 +95,9 @@ def create_app(folder:Path=ROOT):
     app.json.ensure_ascii=False
     confpath=folder/'config.json'
     output=folder/'output'
+    from paper_operations import PaperOperations
+    paper_store = output/'paper_contest_20261113_20261119'
+    paper_operations = PaperOperations(paper_store, secrets.token_hex(32))
 
     def config():
         return load_config(confpath)
@@ -420,7 +423,7 @@ def create_app(folder:Path=ROOT):
     @app.route('/api/paper-contest')
     def api_paper_contest():
         from paper_view import load_snapshot
-        try:return jsonify(load_snapshot(output/'paper_contest_20261113_20261119'))
+        try:return jsonify(load_snapshot(paper_store))
         except FileNotFoundError:return jsonify(error='尚未建立独立模拟账本；不会使用实盘配置代替。'),404
         except (ValueError,KeyError,TypeError,OverflowError):return jsonify(error='模拟账本校验未通过，暂不展示。'),409
 
@@ -428,11 +431,38 @@ def create_app(folder:Path=ROOT):
     def refresh_paper_contest():
         from paper_runtime import refresh_store
         from paper_view import load_snapshot
-        store=output/'paper_contest_20261113_20261119'
-        result=refresh_store(store)
+        result=refresh_store(paper_store)
         if result['status']=='missing':return jsonify(error=result['message']),404
-        try:return jsonify(snapshot=load_snapshot(store),refresh=result)
+        try:return jsonify(snapshot=load_snapshot(paper_store),refresh=result)
         except (ValueError,KeyError,TypeError,OverflowError):return jsonify(error='模拟账本校验未通过，暂不展示。'),409
+
+    @app.route('/api/paper-contest/trade/preview', methods=['POST'])
+    def preview_paper_trade():
+        from paper_operations import PaperTradeConflict
+        try:
+            result = paper_operations.preview(request.get_json(silent=True))
+        except FileNotFoundError:
+            return jsonify(error='尚未建立独立模拟账本'), 404
+        except PaperTradeConflict as error:
+            return jsonify(error=str(error)), 409
+        return jsonify(result), 200 if result['ok'] else 409
+
+    @app.route('/api/paper-contest/trade/confirm', methods=['POST'])
+    def confirm_paper_trade():
+        from paper_operations import PaperTradeConflict
+        from paper_view import load_snapshot
+        try:
+            trade, repeated, warning = paper_operations.confirm(request.get_json(silent=True))
+        except FileNotFoundError:
+            return jsonify(error='尚未建立独立模拟账本'), 404
+        except PaperTradeConflict as error:
+            return jsonify(error=str(error)), 409
+        try:
+            snapshot = load_snapshot(paper_store)
+        except (OSError, ValueError, KeyError, TypeError, OverflowError):
+            snapshot = None
+        message = f'模拟成交 #{trade["sequence"]} 已记录' if repeated else f'已记录模拟成交 #{trade["sequence"]}'
+        return jsonify(ok=True, trade=trade, snapshot=snapshot, message=warning or message, repeated=repeated)
 
     @app.route('/api/session')
     def session_token():
