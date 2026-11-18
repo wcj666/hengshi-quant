@@ -9,14 +9,13 @@ from pathlib import Path
 import secrets
 
 from quote_health import parse_provider_time
+from replay_parameters import load_account_profile
 from strategy_runtime import CST, write
-from strategy_v1 import strategy_prefs
 from strategy_defaults import BACKTEST_ENGINE_FILES
 
-FILES = ('strategy_setup.py', 'strategy_v1.py', 'risk_engine.py', 'trade_signals.py',
-         'strategy_defaults.py', 't_engine.py', 't_runtime.py', 't_costs.py', 'action_center.py', 'alert_journal.py',
-         'v1_backtest.py', 'v1_backtest_data.py',
-         'reminder_validation.py', 't_history_replay.py', 'reminder_policy.py')
+FILES = tuple(dict.fromkeys((*BACKTEST_ENGINE_FILES, 'trade_signals.py', 't_engine.py',
+                            't_runtime.py', 'action_center.py', 'alert_journal.py', 'replay_parameters.py',
+                            'v1_validation.py', 'reminder_validation.py', 't_history_replay.py', 'reminder_policy.py')))
 KINDS = {'v1_entry': 'breakout', 'take_profit_1': 'take_profit_1',
          'take_profit_2': 'take_profit_2', 'sell_ready': 'sell_ready', 'sell_watch': 'sell_ready'}
 
@@ -32,15 +31,43 @@ def _version():
 
 
 def _parameters(output, cfg):
+    return _digest(load_account_profile(output, cfg))
+
+
+def _engine_version():
+    root = Path(__file__).resolve().parent
+    return sha256(b''.join((root / file).read_bytes() for file in BACKTEST_ENGINE_FILES)).hexdigest()
+
+
+def compare_live_parameters(output, meta):
+    """Annotate a saved report without modifying its historical results."""
+    from v1_backtest import simulation_costs
+
+    if not isinstance(meta, dict) or meta.get('demo') is True:
+        return None
     try:
-        fees = json.loads((Path(output) / 't_ledger.json').read_text()).get('fee_model', {})
-    except (OSError, ValueError, AttributeError):
-        fees = {}
-    return _digest({'strategy': strategy_prefs(cfg), 't': cfg.get('t_settings', {}), 'fees': fees})
+        profile = load_account_profile(output)
+    except (OSError, ValueError):
+        profile = None
+    if profile is None:
+        return '当前实盘参数待核对。下方保留历史研究结果，实时提醒以当前核验状态为准。'
+    if meta.get('engine_sha256') != _engine_version() or meta.get('rule_source') != 'account':
+        return '此报告使用旧版引擎或独立研究参数。请按当前规则重新回放，历史结果保留供查看。'
+    if (meta.get('rules') != profile['rules']
+            or ('t_settings' in meta and meta['t_settings'] != profile['t_settings'])
+            or meta.get('costs') != simulation_costs(profile['costs'])):
+        return '实盘参数或券商费率已变化。此报告保留历史结果，需重跑才能影响当前提醒。'
+    kinds = meta.get('asset_kinds')
+    if not isinstance(kinds, list) or any(not isinstance(kind, str) for kind in kinds):
+        return '此报告缺少按品种记录的费用口径，请按当前规则重新回放。'
+    if set(kinds) - profile['costs']['broker_terms'].keys():
+        return '有品种采用模拟费用。需补齐对应券商费率并重跑，才能用于当前强提醒验证。'
+    return None
 
 
 def publish_evidence(output, cfg, bundle, result, *, now=None):
     """Called only after a real replay; legacy or hand-edited verdicts never promote."""
+    from v1_backtest import simulation_costs
     from v1_backtest_data import validate_bundle
     from reminder_validation import evaluate_reminders
     now = now or datetime.now(CST)
@@ -51,31 +78,25 @@ def publish_evidence(output, cfg, bundle, result, *, now=None):
         raise ValueError('历史输入缺少逐文件证据指纹，保持待验证')
     if result['meta'].get('bundle_sha256') != _digest(bundle):
         raise ValueError('验证数据指纹不匹配，不能影响实时提醒')
-    if result['meta'].get('rules') != strategy_prefs(cfg):
+    profile = load_account_profile(output, cfg)
+    meta = result['meta']
+    if (profile is None or meta.get('rule_source') != 'account'
+            or meta.get('rules') != profile['rules'] or meta.get('t_settings') != profile['t_settings']):
         raise ValueError('验证规则参数与当前账户不同，保持待验证')
-    from t_engine import _settings as t_parameters
-    if t_parameters(cfg) != t_parameters({}):
-        raise ValueError('当前做T参数与历史回放默认参数不同，需要重新验证')
-    root = Path(__file__).resolve().parent
-    current_engine = sha256(b''.join((root / f).read_bytes() for f in BACKTEST_ENGINE_FILES)).hexdigest()
-    if result['meta'].get('engine_sha256') != current_engine:
+    kinds = {s['type'] for s in bundle['securities'].values()}
+    if kinds - profile['costs']['broker_terms'].keys() or meta.get('costs') != simulation_costs(profile['costs']):
+        raise ValueError('费用口径未匹配，提醒保持待验证')
+    if meta.get('engine_sha256') != _engine_version():
         raise ValueError('回放引擎版本已经变化，保持待验证')
-    try:
-        model = json.loads((Path(output) / 't_ledger.json').read_text()).get('fee_model', {})
-        costs = result['meta']['costs']
-        for kind in {s['type'] for s in bundle['securities'].values()}:
-            terms = model[kind]
-            if (abs(float(terms['commission_per_10k']) / 10000 - costs['commission_rate']) > 1e-10
-                    or abs(float(terms['minimum_commission']) - costs['minimum_commission']) > 1e-8):
-                raise ValueError('回放费用与当前券商费率不一致')
-    except (OSError, KeyError, TypeError, ValueError) as exc:
-        raise ValueError('费用口径未匹配，提醒保持待验证') from exc
+    for original in result['reports'].values():
+        if any(original['meta'].get(field) != meta[field] for field in ('rules', 'costs', 'engine_sha256', 'bundle_sha256')):
+            raise ValueError('分段回放的参数或证据不一致，提醒保持待验证')
     baseline = (result.get('reminder_validation') or {}).get('meta', {}).get('baseline_code')
     checked = evaluate_reminders(bundle, result, baseline_code=baseline)
     ends = [p['end'] for p in checked['periods']]
     if not ends or max(ends) >= now.date().isoformat():
         raise ValueError('验证仅能使用已完成的历史区间')
-    payload = {'version': _version(), 'parameters': _parameters(output, cfg),
+    payload = {'version': _version(), 'parameters': _digest(profile),
                'codes': sorted(bundle['securities']), 'published_at': now.isoformat(),
                'bundle_sha256': _digest(bundle), 'report': checked,
                'dated_pool': bool(bundle.get('universe') and bundle.get('universe_source'))}

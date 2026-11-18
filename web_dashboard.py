@@ -331,13 +331,15 @@ def create_app(folder:Path=ROOT):
 
     @app.route('/api/backtest')
     def backtest_data():
+        from reminder_policy import compare_live_parameters
+
         path = output / 'v1_backtest' / 'result.json'
         if not path.is_file():
             return jsonify(error='尚未生成回测报告。请先在项目目录运行合成样例或导入历史数据包。'), 404
         records = strategy.read(path)
         if not isinstance(records, dict) or not isinstance(records.get('summary'), dict):
             return jsonify(error='回测报告损坏，请重新生成。'), 409
-        return jsonify(records)
+        return jsonify({**records, 'current_parameter_note': compare_live_parameters(output, records.get('meta') or {})})
 
     @app.route('/backtest/download/<name>')
     def download_backtest(name):
@@ -354,13 +356,15 @@ def create_app(folder:Path=ROOT):
 
     @app.route('/api/backtest/validation')
     def backtest_validation_report():
+        from reminder_policy import compare_live_parameters
+
         path = output / 'v1_validation' / 'comparison.json'
         if not path.is_file():
             return jsonify(error='尚未生成区间对照报告。'), 404
         report = strategy.read(path)
         if not isinstance(report, dict) or not isinstance(report.get('meta'), dict) or not isinstance(report.get('periods'), list):
             return jsonify(error='区间对照报告损坏，请重新生成。'), 409
-        return jsonify(report)
+        return jsonify({**report, 'current_parameter_note': compare_live_parameters(output, report['meta'])})
 
     @app.route('/api/backtest/history-collection')
     def history_collection_status():
@@ -384,6 +388,7 @@ def create_app(folder:Path=ROOT):
 
     @app.route('/api/backtest/reminder-validation')
     def reminder_validation_report():
+        from reminder_policy import compare_live_parameters
         from reminder_validation import no_data
         comparison = strategy.read(output / 'v1_validation' / 'comparison.json')
         meta = comparison.get('meta', {}) if isinstance(comparison, dict) else {}
@@ -397,7 +402,7 @@ def create_app(folder:Path=ROOT):
         if (not isinstance(report, dict) or not isinstance(report.get('meta'), dict)
                 or not isinstance(report.get('periods'), list) or not isinstance(report.get('recommendations'), list)):
             return jsonify(error='提醒验证报告损坏，请重新运行区间回放。'), 409
-        return jsonify(report)
+        return jsonify({**report, 'current_parameter_note': compare_live_parameters(output, meta)})
 
     @app.route('/backtest/validation/download')
     def download_backtest_comparison():
@@ -573,6 +578,15 @@ def create_app(folder:Path=ROOT):
             state['display_snapshot']=load_display_snapshot(output/'last_account_snapshot.json',current_cfg)
             state['broker_snapshot']=latest_broker_snapshot(output,current_cfg)
             state['exit_suggestions']=exit_suggestions(current_cfg)
+            from v1_execution import normalize_execution_costs
+            from replay_parameters import read_broker_terms
+            current_costs=normalize_execution_costs(read_broker_terms(output))
+            if (state.get('entry_execution_costs') or normalize_execution_costs()) != current_costs:
+                state['entry_costs_stale']=True
+                if state.get('risk'):
+                    state['risk']['sizing']=[]
+                for key in ('trade_signals','new_trade_signals'):
+                    state[key]=[x for x in state.get(key,[]) if x.get('trigger')!='v1_entry']
             if t_runtime.settings(current_cfg)['enabled']:
                 book=t_runtime.ledger(output,current_cfg)
                 if (state.get('t_observe') or {}).get('ledger_revision')!=book.get('revision'):
@@ -688,15 +702,22 @@ def create_app(folder:Path=ROOT):
         cfg=config();state=strategy.read(output/'intraday_status.json')
         payload=dict(state.get('t_observe') or {})
         book=t_runtime.ledger(output,cfg)
+        now=datetime.now(strategy.CST)
         try:
             at=datetime.fromisoformat(state.get('fetch_finished_at',''))
-            age=(datetime.now(timezone.utc)-at.astimezone(timezone.utc)).total_seconds() if at.tzinfo else 1e9
+            age=(now-at.astimezone(timezone.utc)).total_seconds() if at.tzinfo else 1e9
         except (ValueError,TypeError):age=1e9
-        valid=bool(0<=age<=45 and state.get('config_hash')==json_hash(cfg) and state.get('mode')=='live'
-                   and state.get('market_session') and state.get('calendar_ok')
-                   and payload.get('ledger_revision')==book.get('revision')
-                   and (state.get('risk') or {}).get('valid')
-                   and not state.get('quote_health',{}).get('block_trade_signals'))
+        pause_reason = next((detail for passed, detail in (
+            (state.get('mode')=='live', '未读取到有效实盘监控数据'),
+            (state.get('calendar_ok'), '交易日历尚未核验'),
+            (state.get('market_session'), '当前不在连续交易时段'),
+            (0<=age<=45, '后台行情更新已超过45秒或时间未核验'),
+            (state.get('config_hash')==json_hash(cfg), '持仓或设置已更新，等待后台按新台账核验'),
+            (payload.get('ledger_revision')==book.get('revision'), '做T台账已更新，等待重新核对成交与可卖量'),
+            (not state.get('quote_health',{}).get('block_trade_signals'), '持仓报价或行情来源时间未通过核验'),
+            ((state.get('risk') or {}).get('valid'), '完整账户行情或风险数据待核验'),
+        ) if not passed), None)
+        valid = pause_reason is None
         if not payload:
             payload={'rows':[],'signals':[],'status':'等待后台采集当前分钟数据后核验做T条件'}
         current={str(p['code']):p for p in cfg.get('positions',[]) if int(p.get('quantity',0))>0 and p.get('type') in ('stock','etf')}
@@ -705,15 +726,26 @@ def create_app(folder:Path=ROOT):
         settings=t_runtime.settings(cfg,book)
         payload.update(enabled=settings['enabled'],settings=settings,
                        cycles=book['cycles'][-30:],availability=book['availability'],stale=not valid)
+        def paused_row(row, reason):
+            return {'code':row['code'],'name':row['name'],'quantity':None,'tradable':False,
+                    'last_status':row.get('status'),'status':'暂停提示','reason':reason,
+                    'blockers':[reason]}
         if not valid:
             payload['signals']=[]
-            payload['status']='非有效盘中、行情过期或台账已变化；暂停做T提示，保留记录供核对'
-            payload['rows']=[{**row,'quantity':None,'tradable':False,'last_status':row.get('status'),'status':'暂停提示',
-                              'blockers':list(dict.fromkeys(row.get('blockers',[])+['当前盘中快照未核验']))} for row in payload.get('rows',[])]
+            payload['status']=pause_reason+'，暂停做T提示'
+            payload['rows']=[paused_row(row, pause_reason) for row in payload['rows']]
         else:
+            from action_center import fresh
             from reminder_policy import apply_policy
 
-            payload['signals'] = apply_policy(output, cfg, payload.get('signals', []))
+            expired=set()
+            for i,row in enumerate(payload['rows']):
+                if row.get('minute_asof') and not (fresh(row.get('quote_asof'),now)
+                        and fresh(row.get('minute_source_at'),now) and fresh(row['minute_asof'],now,150)):
+                    expired.add(row['code'])
+                    payload['rows'][i]=paused_row(row, '个股报价或分钟数据已过期，等待重新核验')
+            signals=[s for s in payload.get('signals', []) if s.get('code') not in expired or s.get('ledger_notice')]
+            payload['signals'] = apply_policy(output, cfg, signals, now=now)
             limited = {(s['code'], s['trigger']): s for s in payload['signals']
                        if s.get('validation_status') in ('pending', 'excluded')}
             for row in payload['rows']:
@@ -1326,8 +1358,7 @@ def create_app(folder:Path=ROOT):
                            asset_type=asset_type,price_label='最新完整历史日线收盘价') if len(hist) else None)
         snapshot={};quote={};now_cn=datetime.now(ZoneInfo('Asia/Shanghai'))
         if mode=='live':
-            try:snapshot=json.loads((output/'intraday_status.json').read_text(encoding='utf-8'))
-            except (OSError,ValueError):pass
+            snapshot=intraday_state().get_json()
             if snapshot.get('config_hash')==json_hash(cfg):
                 quote=next((q for q in snapshot.get('quotes',[]) if q['code']==code),{})
             source=parse_provider_time(quote.get('source_timestamp'))

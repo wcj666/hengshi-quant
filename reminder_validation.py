@@ -43,7 +43,7 @@ def compare_curve(initial, curve, fees):
             'max_drawdown_pct': _drawdowns(initial, curve)[1], 'fees': fees}
 
 
-def baseline_window(bundle, start, end, initial, costs, code):
+def baseline_window(bundle, start, end, initial, costs, code, *, rules=None):
     """Use the same cost and capacity model for a single preselected buy-and-hold."""
     if code is None:
         return compare_curve(initial, [initial], 0), True, []
@@ -51,7 +51,7 @@ def baseline_window(bundle, start, end, initial, costs, code):
     kind = item['type']
     cash, quantity = initial, 0
     fee, last_close = 0, None
-    cap = initial * strategy_prefs({})['max_position_pct'] / 100
+    cap = initial * strategy_prefs({'strategy_v1': rules})['max_position_pct'] / 100
     calendar = bundle['calendar']
     curve = []
     for day in calendar[calendar.index(start):calendar.index(end) + 1]:
@@ -179,14 +179,15 @@ def evaluate_reminders(bundle, result, *, baseline_code=None):
     for original in result['periods']:
         key, start, end = (original[x] for x in ('key', 'start', 'end'))
         main = result['reports'][key]
-        baseline, baseline_ready, baseline_warnings = baseline_window(bundle, start, end, initial, costs, baseline_code)
+        baseline, baseline_ready, baseline_warnings = baseline_window(
+            bundle, start, end, initial, costs, baseline_code, rules=meta['rules'])
         by_kind = reminder_counts(main['reminders'], TRADE_KINDS)
         scoped_coverage = stock_coverage(main)
         ablation = {}
         for kind in ('take_profit_1', 'take_profit_2'):
             if by_kind[kind]['triggers']:
                 variant = run_backtest(bundle, start, end, initial, bundle_sha256=meta['bundle_sha256'],
-                                       costs=costs, disabled_profit_targets=(kind,))
+                                       costs=costs, rules=meta['rules'], disabled_profit_targets=(kind,))
                 ablation[kind] = {**stock_metrics(variant), 'covered': stock_coverage(variant)}
         trade = {
             'strategy': stock_metrics(main), 'baseline': {**baseline, 'covered': baseline_ready},
@@ -194,7 +195,7 @@ def evaluate_reminders(bundle, result, *, baseline_code=None):
             'covered': scoped_coverage, 'sample_count': main['summary']['closed_trade_count'],
             'session_count': main['summary']['session_count'], 'warnings': original['warnings'] + baseline_warnings,
         }
-        t = evaluate_t_window(bundle, start, end, initial, costs)
+        t = evaluate_t_window(bundle, start, end, initial, costs, rules=meta['rules'], t_settings=meta['t_settings'])
         t['session_count'] = main['summary']['session_count']
         periods.append(dict(key=key, label=original['label'], start=start, end=end, trade=trade, t=t))
     recommendations = []
@@ -207,12 +208,15 @@ def evaluate_reminders(bundle, result, *, baseline_code=None):
             'demo': demo, 'source': meta['source'], 'generated_at': datetime.now(timezone.utc).isoformat(),
             'baseline_code': baseline_code, 'bundle_sha256': meta['bundle_sha256'],
             'engine_sha256': meta['engine_sha256'], 'validator_sha256': validator_digest,
-            'baseline_label': f'{baseline_code} 买入持有（最多 15% 仓位）' if baseline_code else '现金不动',
-            't_baseline_label': '相同底仓不动', 'costs': costs,
+            'baseline_label': (f'{baseline_code} 买入持有（最多 {meta["rules"]["max_position_pct"]:g}% 仓位）'
+                               if baseline_code else '现金不动'),
+            't_baseline_label': '相同底仓不动', 'costs': costs, 'rules': meta['rules'],
+            't_settings': meta['t_settings'], 'fee_source_note': meta['fee_source_note'],
             'warnings': [
                 '各区间独立估值。可成交是触发后至少有一笔模拟成交，包含部分成交；没有触发显示空值。',
                 '突破项比较整套 V1 与持有基准，不能单独归因于突破。两档止盈分别移除再回放。',
                 '时间切分只证明各段不重叠。若留出段已用于调参，需另取未查看的数据再验证。',
+                meta['fee_source_note'],
                 '佣金、税费与滑点已计入回放，最大回撤按日终净值计算。模拟成交受上一分钟的成交量约束，不能还原真实排队。',
                 '筛选使用验证和留出两段，仅影响报告的强提醒候选。固定止损保留，实际提醒设置由用户管理。',
                 '做 T 的两类提醒作为一组与原仓不动对照；合计包含未接回产生的仓位差异。',

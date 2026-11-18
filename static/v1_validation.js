@@ -57,6 +57,7 @@ function render(report) {
     row(labels[period.key], fields.map(field => number(period.input_coverage?.[field])))
   ));
   list('warnings', [
+    ...[report.current_parameter_note].filter(Boolean),
     ...(meta.warnings ?? []),
     ...(meta.gaps ?? []).map(gap =>
       `未纳入对照 ${gap.start} 至 ${gap.end}（${number(gap.session_count)} 个交易日）`

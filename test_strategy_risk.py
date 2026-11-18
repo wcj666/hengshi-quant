@@ -5,6 +5,7 @@ from risk_engine import compute
 from risk_extensions import risk_level, tier_alerts, simulate_reduction
 from trade_levels import make_levels, validate_plan
 from strategy_v1 import strategy_prefs
+from v1_execution import normalize_execution_costs
 
 
 def fixed(entry=20,stop=19,sector='工业',**extra):
@@ -27,10 +28,10 @@ def configuration():
             'positions':[],'trade_plans':{'600001':fixed()},'strategy_v1':{'enabled':True}}
 
 
-def run(cfg=None,context=None,quotes=None,code='600001',price=20):
+def run(cfg=None,context=None,quotes=None,code='600001',price=20,*,execution_costs=None):
     return compute(cfg or configuration(),quotes or {},fresh=True,
                    watch_quotes=[{'code':code,'name':'测试普通股','price':price}],
-                   strategy_account=account() if context is None else context)
+                   strategy_account=account() if context is None else context,execution_costs=execution_costs)
 
 
 def add_position(cfg,code='600010',quantity=100,price=20,sector='其他'):
@@ -61,6 +62,29 @@ class V1RiskTests(unittest.TestCase):
         size=run(cfg)['sizing'][0]
         self.assertEqual(size['max_buy_shares'],0)
         self.assertIn('净价差筛选值不足1.5',size['reason'])
+
+    def test_confirmed_fees_and_protected_risk_are_separate(self):
+        cfg=configuration()
+        cfg['trade_plans']['159001']=fixed(1,.95,equity_etf=True)
+        terms=normalize_execution_costs({'etf':{'commission_per_10k':5,'minimum_commission':5}})
+        row=run(cfg,code='159001',price=1,execution_costs=terms)['sizing'][0]
+        self.assertEqual(row['max_buy_shares'],2600)
+        self.assertEqual(row['expected_stop_fees'],10)
+        self.assertEqual(row['stop_slippage'],2.6)
+        self.assertEqual(row['fee_reserve'],20)
+        self.assertEqual(row['risk_cost_allowance'],20)
+        self.assertEqual(row['total_planned_risk'],150)
+        self.assertEqual(row['stop_net_risk'],142.6)
+        self.assertGreater(row['reward_risk'],1.5)
+        self.assertIsNone(run(cfg,code='159001',price=1)['sizing'][0]['expected_stop_fees'])
+
+    def test_actual_thresholds_in_failed_sizing(self):
+        cfg=configuration()
+        cfg['strategy_v1'].update(max_position_pct=3,min_reward_risk=1.8)
+        row=run(cfg)['sizing'][0]
+        self.assertIn('单只仓位3%额度不足一手',row['reason'])
+        cfg['strategy_v1']['max_position_pct']=15
+        self.assertIn('筛选值不足1.8',run(cfg)['sizing'][0]['reason'])
 
     def test_missing_stop_retains_complete_quote_assets_and_pnl(self):
         cfg=configuration();prices=add_position(cfg);cfg['trade_plans'].pop('600010')

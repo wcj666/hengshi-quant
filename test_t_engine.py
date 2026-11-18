@@ -60,6 +60,15 @@ class TEngineTests(unittest.TestCase):
         result=self.call(ledger=book)
         self.assertEqual(result['signals'],[])
         self.assertGreater(result['rows'][0]['fee_reserve'],160)
+
+    def test_t_separates_unknown_commission_from_break_even_assumption(self):
+        row=self.call()['rows'][0]
+        self.assertIsNone(row['estimated_roundtrip_fee'])
+        self.assertIsNone(row['net_spread_estimate'])
+        self.assertEqual(row['fee_coverage_assumption'],20)
+        self.assertEqual(row['break_even_buy_price'],20.8)
+        self.assertEqual(row['cost_buyback_cap'],20.6)
+        self.assertIsNone(row['target_buy'], 'An unfilled sale cannot create a buyback task')
     def test_unknown_sellable_stays_observation_only(self):
         d=self.call(ledger={'availability':{},'cycles':[]});r=d['rows'][0]
         self.assertEqual(r['phase'],'sell_watch');self.assertIsNone(r['quantity']);self.assertFalse(r['tradable'])
@@ -141,6 +150,21 @@ class TEngineTests(unittest.TestCase):
         self.assertEqual(row['estimated_roundtrip_fee'],35.03)
         self.assertEqual(row['minimum_spread'],.71)
         self.assertEqual(row['target_buy'],20.29)
+
+    def test_buyback_shows_failed_price_and_rebound_checks_separately(self):
+        args=self.buyback_fixture()
+        args['ledger']['cycles'][0]['sell_price']=19.95
+        prices=[20.2]*57+[19.8,19.7,19.6]
+        args['quotes'][self.code]['price']=19.6
+        args['minutes']=self.minutes(prices)
+        row=self.call(**args)['rows'][0]
+        checks={check['label']:check['passed'] for check in row['checks']}
+        self.assertEqual(row['phase'],'buyback_wait')
+        self.assertFalse(checks['接回价差'])
+        self.assertTrue(checks['回踩均价下方'])
+        self.assertFalse(checks['回踩后企稳'])
+        self.assertNotIn('当日可卖底仓', checks)
+        self.assertIsNone(row['quantity'])
     def test_closed_cycle_and_late_day_do_not_restart(self):
         book=deepcopy(self.ledger);book['cycles']=[{'code':self.code,'date':'2026-11-11','status':'cash'}]
         self.assertEqual(self.call(ledger=book)['rows'][0]['phase'],'closed')

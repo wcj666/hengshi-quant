@@ -8,6 +8,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import uuid4
 
+from replay_parameters import load_account_profile, t_rules
+from strategy_defaults import T_DEFAULTS
 from v1_backtest import ROOT, run_backtest
 from v1_backtest_data import demo_bundle, load_bundle, validate_bundle
 from v1_backtest_report import save_report
@@ -79,7 +81,7 @@ def period_warnings(report):
     return warnings
 
 
-def evaluate(bundle, windows, initial_cash=100000.0, *, bundle_sha256=None, baseline_code=None):
+def evaluate(bundle, windows, initial_cash=100000.0, *, bundle_sha256=None, baseline_code=None, profile=None):
     """Replay disjoint windows with unchanged rules, each starting from cash."""
     validate_bundle(bundle)
     checked, gaps = check_windows(windows, bundle["calendar"])
@@ -89,11 +91,14 @@ def evaluate(bundle, windows, initial_cash=100000.0, *, bundle_sha256=None, base
         bundle_sha256 = hashlib.sha256(raw).hexdigest()
     periods, reports = [], {}
     common = None
+    params = {key: profile[key] for key in ('rules', 'costs')} if profile is not None else {}
+    t_settings = t_rules({'t_settings': profile['t_settings'] if profile is not None else T_DEFAULTS})
     for key, label, start, end in checked:
-        report = run_backtest(bundle, start, end, initial_cash, bundle_sha256=bundle_sha256)
+        report = run_backtest(bundle, start, end, initial_cash, bundle_sha256=bundle_sha256, **params)
         meta = report["meta"]
         verified = {field: meta[field] for field in (
             "bundle_sha256", "engine_sha256", "initial_cash", "rules", "costs",
+            "fee_sources", "fee_source_note", "rule_source", "asset_kinds",
         )}
         if meta["bundle_sha256"] != bundle_sha256 or common is not None and verified != common:
             raise ValueError("区间间的数据指纹、初始资金或回放规则不一致")
@@ -110,6 +115,10 @@ def evaluate(bundle, windows, initial_cash=100000.0, *, bundle_sha256=None, base
     warnings = ["日期互不重叠只能核对切分，留出区间在选规则前是否已被查看或用于调参，需要由研究记录证明。"]
     if demo:
         warnings.append("这是合成样例，结果仅用于检查回放和区间对比。")
+    else:
+        warnings.append('回放使用本机生效的策略参数。' if profile is not None else
+                        '未取得实盘参数，使用独立研究的初始化默认值，提醒保持待验证。')
+        warnings.append(common['fee_source_note'])
     if gaps:
         warnings.append("区间之间有交易日未纳入对比，详见间隔记录。")
     if "universe" not in bundle or not bundle.get("universe_source"):
@@ -122,7 +131,7 @@ def evaluate(bundle, windows, initial_cash=100000.0, *, bundle_sha256=None, base
         "meta": {
             "demo": demo, "source": bundle["source"], "calendar_source": bundle["calendar_source"],
             "universe_source": bundle.get("universe_source"), "input_digests": bundle.get("input_digests", {}),
-            "policy": policy, "warnings": warnings, "gaps": gaps, **common,
+            "policy": policy, "warnings": warnings, "gaps": gaps, "t_settings": t_settings, **common,
         },
         "periods": periods, "reports": reports,
     }
@@ -168,6 +177,8 @@ def main():
         parser.add_argument(f"--{key}", type=parse_window, help=f"{label}，YYYY-MM-DD:YYYY-MM-DD")
     parser.add_argument("--initial-cash", type=float, default=100000.0)
     parser.add_argument("--baseline-code", help="预先指定数据包中的买入持有基准；省略则使用现金基准")
+    parser.add_argument("--account-output", type=Path, default=ROOT / "output",
+                        help="实盘运行数据目录；回放读取同目录费率及上一级 config.json")
     parser.add_argument("--output", type=Path, default=ROOT / "output" / "v1_validation")
     args = parser.parse_args()
     windows = {key: getattr(args, key) for key in PERIOD_KEYS}
@@ -181,7 +192,9 @@ def main():
             if not all(windows.values()):
                 parser.error("--bundle 须同时提供 --development、--validation、--holdout")
             bundle, digest = load_bundle(args.bundle)
-        result = evaluate(bundle, windows, args.initial_cash, bundle_sha256=digest, baseline_code=args.baseline_code)
+        profile = load_account_profile(args.account_output) if args.bundle else None
+        result = evaluate(bundle, windows, args.initial_cash, bundle_sha256=digest, baseline_code=args.baseline_code,
+                          profile=profile)
         report_path = save_comparison(result, args.output)
     except (ValueError, OSError) as exc:
         parser.error(str(exc))

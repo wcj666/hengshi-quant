@@ -4,6 +4,7 @@ import math
 from trade_levels import config_plan, make_levels, num
 from pnl_engine import calculate as calculate_pnl
 from strategy_defaults import V1_DEFAULTS
+from v1_execution import entry_economics
 
 
 def enabled(cfg):
@@ -127,7 +128,8 @@ def _fees(plan,settings,remaining=False):
     return max(settings['fee_reserve'],reserve or 0)
 
 
-def compute_strategy(cfg,quotes,fresh=False,watch_quotes=None,previous_closes=None,strategy_account=None,legacy_settings=None):
+def compute_strategy(cfg,quotes,fresh=False,watch_quotes=None,previous_closes=None,strategy_account=None,
+                     legacy_settings=None,*,execution_costs=None):
     from risk_engine import cash_balances
     settings=dict(legacy_settings or {});settings.update(strategy_prefs(cfg))
     quotes=quotes or {};cash,frozen_cash=cash_balances(cfg);base=float(cfg['baseline_equity'])
@@ -177,17 +179,18 @@ def compute_strategy(cfg,quotes,fresh=False,watch_quotes=None,previous_closes=No
     transition=[]
     if valid and equity>0:
         single_excess=[row['code'] for row in rows if row['value']>equity*settings['max_position_pct']/100+1e-8]
-        if single_excess:transition.append('单一证券超过15%上限：'+','.join(single_excess))
-        if exposure_pct>settings['max_exposure_pct']+1e-8:transition.append('权益总仓位超过60%上限')
+        if single_excess:transition.append(f"单一证券超过{settings['max_position_pct']:g}%上限："+','.join(single_excess))
+        if exposure_pct>settings['max_exposure_pct']+1e-8:transition.append(f"权益总仓位超过{settings['max_exposure_pct']:g}%上限")
         if any(value>equity*settings['max_sector_pct']/100+1e-8 for value in sector_values.values()):
-            transition.append('同行业仓位超过30%上限')
+            transition.append(f"同行业仓位超过{settings['max_sector_pct']:g}%上限")
     elif valid:blockers.append('账户净值必须大于0')
-    if count>settings['max_positions']:transition.append('现有持仓超过4只上限')
+    if count>settings['max_positions']:transition.append(f"现有持仓超过{settings['max_positions']}只上限")
     transition.extend(['已有持仓待补固定止损'] if unknown_stops else [])
     transition.extend(['已有持仓待补行业分类'] if unknown_sectors else [])
     blockers.extend(transition)
     if count>=settings['max_positions']:blockers.append('已达同时持仓数量上限')
-    if account_verified and account['opens_today']>=settings['max_daily_opens']:blockers.append('已达每日新开1只上限')
+    if account_verified and account['opens_today']>=settings['max_daily_opens']:
+        blockers.append(f"已达每日新开{settings['max_daily_opens']}只上限")
     if remaining is not None and (remaining<=0 or (planned_stress is not None and planned_stress>=remaining)):
         blockers.append('账户剩余计划风险预算不足')
     if blockers:available=0.
@@ -224,27 +227,50 @@ def compute_strategy(cfg,quotes,fresh=False,watch_quotes=None,previous_closes=No
             if trigger is None:reasons.append('缺少固定触发下沿')
             elif trigger>levels['reference']:reasons.append('触发下沿高于Ecap，计划区间为空')
             elif price<trigger:reasons.append('现价尚未达到固定触发下沿')
-        quantity=0;net_rr=None;fee=_fees(plan,settings)
-        price_risk=total_risk=notional=None
+        quantity=0;fee=_fees(plan,settings)
+        economics={};notional=None;tested_quantity=None
         if not reasons and levels and valid and equity and price:
             entry=levels['reference'];stop=levels['stop_loss'];distance=entry-stop
             sector_value=sector_values.get(_sector(plan),0)
-            money=min(cash-fee,equity*settings['max_position_pct']/100,
-                      equity*settings['max_exposure_pct']/100-exposure,
-                      equity*settings['max_sector_pct']/100-sector_value)
-            shares=min(money/entry,(settings['per_trade_risk']-fee)/distance,(available-fee)/distance)
+            limits={
+                '可用现金':(cash-fee)/entry,
+                f"单只仓位{settings['max_position_pct']:g}%":equity*settings['max_position_pct']/100/entry,
+                f"总仓位{settings['max_exposure_pct']:g}%":(equity*settings['max_exposure_pct']/100-exposure)/entry,
+                f"行业仓位{settings['max_sector_pct']:g}%":(equity*settings['max_sector_pct']/100-sector_value)/entry,
+                '单笔风险':(settings['per_trade_risk']-fee)/distance,
+                '剩余账户风险':(available-fee)/distance,
+            }
+            shares=min(limits.values())
             quantity=max(0,math.floor((shares+1e-10)/100)*100)
-            if quantity<100:reasons.append('费用、现金、仓位或风险额度不足100股')
-            else:
-                price_risk=distance*quantity;total_risk=price_risk+fee;notional=entry*quantity
-                net_rr=((levels['take_profit_1']-entry)*quantity-fee)/total_risk
-                if net_rr+1e-10<settings['min_reward_risk']:
-                    reasons.append('全仓假设在TP1退出的净价差筛选值不足1.5');quantity=0
+            reasons.extend(f'{label}额度不足一手（100股/份）' for label, limit in limits.items() if limit+1e-8<100)
+            while quantity>=100:
+                tested_quantity=quantity
+                economics=entry_economics(kind,quantity,entry,stop,levels['take_profit_1'],fee,execution_costs)
+                entry_cost=max(fee,economics['expected_entry_fee'] or 0)
+                if (economics['total_planned_risk']<=min(settings['per_trade_risk'],available)
+                        and entry*quantity+entry_cost<=cash+1e-8):
+                    break
+                quantity-=100
+            if tested_quantity is not None:
+                if quantity<100:
+                    if entry*tested_quantity+max(fee,economics['expected_entry_fee'] or 0)>cash+1e-8:
+                        reasons.append('按预计入场费用核算后可用现金不足一手')
+                    if economics['total_planned_risk']>settings['per_trade_risk']:
+                        reasons.append('计入预计费用与滑点后单笔风险额度不足一手')
+                    if economics['total_planned_risk']>available:
+                        reasons.append('计入预计费用与滑点后剩余账户风险不足一手')
+                elif (economics['reward_risk'] is None
+                      or economics['reward_risk']+1e-10<settings['min_reward_risk']):
+                    reasons.append(f"全仓假设在TP1退出的净价差筛选值不足{settings['min_reward_risk']:g}")
+                    quantity=0
+                if quantity:
+                    notional=round(entry*quantity,2)
+        net_rr=economics.get('reward_risk')
         summary['sizing'].append({'code':code,'name':item.get('name',code),'price':price,
-             'max_buy_shares':quantity,'levels':levels,'reward_risk':round(net_rr,4) if net_rr is not None else None,
-             'fee_reserve':fee,'price_risk':round(price_risk,2) if price_risk is not None else None,
-             'total_planned_risk':round(total_risk,2) if total_risk is not None else None,
-             'max_notional':round(notional,2) if notional is not None else None,
+             'max_buy_shares':quantity,'levels':levels,'fee_reserve':fee,
+             'price_risk':None,'total_planned_risk':None,**economics,
+             'reward_risk':round(net_rr,4) if net_rr is not None else None,
+             'tested_quantity':tested_quantity,'max_notional':notional,
              'blockers':list(dict.fromkeys(reasons)),
              'reason':'；'.join(dict.fromkeys(reasons)) if reasons else '按Ecap、费用及账户全部上限估算；须在券商核验后手工执行'})
     return summary

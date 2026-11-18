@@ -300,12 +300,13 @@ function renderSwing(s){
  const lines=(s.checks||[]).map(x=>`<div class="swing-check"><span class="${x.passed?'pass':'pending'}">${x.passed?'✓':'·'} ${escapeHtml(x.name)}</span><span>${escapeHtml(x.detail)}</span></div>`).join('');
  const blockers=(s.blockers||[]).length?`<div class="swing-blockers"><strong>${escapeHtml(s.blockers_title||'目前暂停新增')}</strong><ul>${s.blockers.map(x=>`<li>${escapeHtml(x)}</li>`).join('')}</ul></div>`:'';
  const pr=s.price_review,priceReview=pr?.valid?`<p class="tip">结构观察（日线截至 ${escapeHtml(pr.asof)}）：20日低点 ${priceText(pr.support)} · 20日高点 ${priceText(pr.resistance)} · MA20 ${priceText(pr.ma20)}。这些是观察位，不是已锁定的止损或卖出委托。</p>`:'';
+ const economics=entryEconomics(s.entry_economics);
  node.innerHTML=`<article class="swing-card ${escapeHtml(s.tone||'neutral')}">
  <div class="swing-header"><span>操作参考 · ${escapeHtml(s.horizon)}</span><span>日线截至 ${escapeHtml(s.asof||'待核验')}</span></div>
  <h3>${escapeHtml(s.label)}</h3><p class="swing-summary">${escapeHtml(s.summary)}</p>
  <div class="swing-prices"><span>最新参考 <b>${priceText(level.current)}</b></span><span>止损 / 失效参考 <b>${priceText(level.stop)}</b></span><span>第一止盈 <b>${priceText(level.target1)}</b></span><span>第二止盈 <b>${priceText(level.target2)}</b></span></div>
  <p class="tip">${escapeHtml(level.source||'缺少有效价格依据')}${level.quote_asof?' · 报价参考 '+escapeHtml(new Date(level.quote_asof).toLocaleTimeString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false}))+'，重新分析可更新':''}${s.chan_confirmation?` · ${escapeHtml(s.chan_confirmation.kind)}，${escapeHtml(s.chan_confirmation.confirmed_on)}确认（${s.chan_confirmation.bars_ago}根日K前）`:''}</p>
- ${priceReview}${blockers}${s.max_buy_shares?`<p class="swing-capacity">预算测算上限 ${format(s.max_buy_shares,0)} 股 · 价差收益/风险比 ${format(s.reward_risk,2)}，不是推荐买入数量。</p>`:''}
+ ${priceReview}${blockers}${s.max_buy_shares?`<p class="swing-capacity">预算测算上限 ${format(s.max_buy_shares,0)} 股/份 · 净收益风险比 ${format(s.reward_risk,2)}</p>`:''}${economics?`<p class="tip">${escapeHtml(economics)}</p>`:''}
  <details class="swing-evidence" open><summary>为什么这样判断</summary>${lines}</details><small>${escapeHtml(s.note)}</small></article>`;
 }
 function renderTechnical(t,j,opts={}){
@@ -396,7 +397,24 @@ function planCell(levels,code=null){
 }
 function renderWatch(){const s=STORE;let levels=new Map(s.config.alert_levels.map(x=>[x.code,x]));let rows=s.watchlist.map(x=>{let lvl=levels.get(x.code)||{};let level=`${lvl.below??'—'} / ${lvl.above??'—'}`;return tr([`<strong>${escapeHtml(x.name)}</strong>`,val(x.code),signedPriceText(x.price,x.pct,3),signedPctText(x.pct),escapeHtml(level),planCell(x.levels,x.code),`<button class="btn small ghost" data-action="analyze" data-code="${x.code}">分析</button> <button class="btn small ghost" data-action="plan" data-code="${x.code}">止盈止损</button> <button class="btn small ghost" data-action="level" data-code="${x.code}">突破位</button> <button class="btn small danger" data-action="remove-watch" data-code="${x.code}">删除</button>`]);});$('watch-table').innerHTML=table(['股票','代码','快照价','当日涨跌','破位/突破','关键止盈止损参考价','操作'],rows);}
 function renderPositions(liveRisk=null,liveQuotes=[]){let rows=STORE.config.positions.map(p=>{const now={...((liveRisk?.positions||STORE.risk.positions).find(x=>x.code===p.code)||{})};const live=liveRisk?.pnl?.positions?.[p.code];const tick=liveQuotes.find(x=>x.code===p.code&&x.held&&x.price!==null);if(live&&tick){now.price=tick.price;now.value=Number((Number(tick.price)*Number(p.quantity)).toFixed(2));now.floating_pnl=live.floating_pnl;now.daily_pnl=live.daily_pnl;}let st=now.stop_breached?pill('已触及参考止损','danger'):'';let shown=(v)=>signedMoneyText(v);const priceSignal=now.daily_pnl!==null&&now.daily_pnl!==undefined?now.daily_pnl:(now.price!==null&&now.price!==undefined?Number(now.price)-Number(p.cost):null);return tr([escapeHtml(p.name),val(p.code),p.type==='stock'?'股票':p.type==='etf'?'ETF':'转债',escapeHtml(p.sector||now.sector||'待补'),format(p.quantity,0),format(p.cost,3),signedPriceText(now.price,priceSignal,3),now.value?money(now.value):'—',shown(now.floating_pnl),shown(now.daily_pnl),planCell(now.levels,p.code)+st,`<button class="btn small ghost" data-action="plan" data-code="${p.code}">止盈止损</button> <button class="btn small ghost" data-action="analyze" data-code="${p.code}">缠论</button> <button class="btn small ghost" data-action="edit-position" data-code="${p.code}">编辑</button> <button class="btn small danger" data-action="remove-position" data-code="${p.code}">删除</button>`]);});$('positions-table').innerHTML=table(['证券','代码','类型','行业','数量','成本','快照价','市值','浮动盈亏','当日参考盈亏','关键价格','台账操作'],rows);}
-function renderSizing(liveSizing=null){let rows=(liveSizing??STORE.risk.sizing).map(p=>tr([escapeHtml(p.name),val(p.code),p.price===null?'—':format(p.price,3),planCell(p.levels),p.max_buy_shares===null?pill('暂无有效计算'):p.max_buy_shares===0?pill('0股：V1条件未通过','danger'):`<strong>${format(p.max_buy_shares,0)}股</strong>`,`<span class="muted">${escapeHtml(p.reason||'')}</span>`]));$('sizing-table').innerHTML=table(['股票','代码','快照价','参考止盈止损','最多新增股数','计算说明'],rows);}
+function entryEconomics(s){
+ if(s?.tested_quantity==null)return '';
+ const fees=s.estimated_costs_known
+   ? `预计双边费用 止损 ${money(s.expected_stop_fees)} / 第一目标 ${money(s.expected_target_fees)}`
+   : '双边费用待核，收益风险比按预留保守筛选';
+ const rr=s.reward_risk==null?'待核':format(s.reward_risk,2);
+ return [`测算 ${format(s.tested_quantity,0)} 股/份`,fees,
+         `预计退出滑点 止损 ${money(s.stop_slippage)} / 第一目标 ${money(s.target_slippage)}`,
+         `风控预留基准 ${money(s.fee_reserve)} · 计入风险的费用和滑点 ${money(s.risk_cost_allowance)}`,
+         `计划总风险 ${money(s.total_planned_risk)} · 全仓按第一目标退出的净收益风险比 ${rr}`].join(' · ');
+}
+function renderSizing(liveSizing=null){
+ const rows=(liveSizing??STORE.risk.sizing).map(p=>tr([
+   escapeHtml(p.name),val(p.code),p.price===null?'—':format(p.price,3),planCell(p.levels),
+   p.max_buy_shares===null?pill('暂无有效计算'):p.max_buy_shares===0?pill('V1条件未通过','danger'):`<strong>${format(p.max_buy_shares,0)}股/份</strong>`,
+   `<span class="muted">${escapeHtml(p.reason||'')}</span>${p.tested_quantity!=null?`<p class="tip">${escapeHtml(entryEconomics(p))}</p>`:''}`]));
+ $('sizing-table').innerHTML=table(['证券','代码','快照价','参考止盈止损','最多新增股数','计算说明'],rows);
+}
 function plot(data,levels){
  if(!data||data.length<2)return '历史行情不足';
  const values=data.map(x=>Number(x.close));
@@ -593,7 +611,8 @@ function applyLiveAccountSnapshot(d){
  showPnl(r.pnl,verified?'快照估算':'源时间未核验');
  if(STORE){
   renderPositions(r,d.quotes||[]);
-  if(verified&&!strategyBlocked&&riskComplete)renderSizing(r.sizing||[]);
+  if(d.entry_costs_stale)$('sizing-table').innerHTML='<div class="empty">券商费用参数已更新，等待新一轮开仓测算。</div>';
+  else if(verified&&!strategyBlocked&&riskComplete)renderSizing(r.sizing||[]);
   else if(strategyBlocked||!riskComplete)$('sizing-table').innerHTML='<div class="empty">V1账户、固定止损或行业条件待核验，暂停新增股数；最新资产与盈亏继续显示。</div>';
   else $('sizing-table').innerHTML='<div class="empty">源报价时间未全部核验，暂停显示新增可买股数；请核对券商报价。</div>';
  }
@@ -782,26 +801,31 @@ function renderTObserve(data){
  const ready=active?rows.filter(r=>r.tradable===true).length:0;
  $('t-count').textContent=!d.enabled?'做T观察未启用':d.stale?'暂停实时提示':`${rows.length}只持仓 · ${ready}只条件通过`;
  $('t-count').className='pill '+(active?'':'muted');
- $('t-settings').textContent=`先卖后买 · 每只每天最多 1 轮 · 风控费用滑点至少预留 ${money(Math.max(20,Number(d.settings?.fee_reserve)||20))}。保本价差按确认数量测算，盘中提示另有风控门槛。`;
+ $('t-settings').textContent=`先卖后买 · 每只每天最多 1 轮 · 最低费用与滑点预留 ${money(d.settings?.fee_reserve)}。按实际卖出或假设卖出分别测算保本价和风控接回上限。`;
  const feeSummary=$('t-fee-model-summary');
  if(feeSummary)feeSummary.textContent=tFeeTerms(d.settings?.fee_model);
  if($('t-fee-form')?.dataset?.feeReady!=='true')seedTFeeForm(d);
  $('t-observation-list').innerHTML=rows.length?rows.map(row=>{
   const blockers=(row.blockers||[]).map(noteText),price=active?row.price:null;
-  const quantity=active&&!blockers.length&&row.quantity!==null&&row.quantity!==undefined&&Number.isInteger(Number(row.quantity))&&Number(row.quantity)>=100?Number(row.quantity):null;
+  const quantity=active&&row.tradable===true&&!blockers.length&&Number.isInteger(row.quantity)&&row.quantity>=100?row.quantity:null;
   const net=active?row.net_spread_estimate:null,gross=active?row.gross_spread_estimate:null;
-  const modeled=active&&Number.isFinite(row.break_even_gap);
-  const basis=(row.fee_basis||[]), feeLabel=basis.includes('reserve')?'含费用预留':basis.includes('comparable_fills')?'含相近实付样本':'按设置及已知费用';
+  const inCycle=Boolean(row.cycle_id),modeled=active&&Number.isFinite(row.break_even_gap);
+  const cycleNote=row.phase==='closed'?'今天本轮已经结束。':row.phase==='expired'?'历史未完成轮次待人工复盘。':
+    inCycle?'需同时通过价差、企稳和接回风控。':'实际卖出并登记后才会核对接回条件。';
+  const feesPending=active&&(row.fee_basis||[]).includes('reserve');
+  const feeLabel=feesPending?`费率待核，按 ${money(row.fee_coverage_assumption)} 覆盖试算`:(row.fee_basis||[]).includes('comparable_fills')?'采用相近实付样本':'采用已核对费率或实付费用';
   const checks=active?(row.checks||[]):[];
+  const blockerList=active&&blockers.length?'<ul class="t-blockers">'+blockers.map(x=>`<li>${escapeHtml(x)}</li>`).join('')+'</ul>':'';
   const checklist=checks.length?'<ul class="t-checklist">'+checks.map(c=>`<li class="${c.passed===true?'pass':'pending'}"><strong>${c.passed===true?'已通过':c.passed===false?'未通过':'待核验'} · ${escapeHtml(c.label)}</strong><span>${escapeHtml(c.detail)}</span></li>`).join('')+'</ul>':'';
   return `<article class="t-observation-card ${active&&blockers.length?'blocked':''}"><div class="signal-card-head"><strong>${escapeHtml(row.name||row.code)}（${escapeHtml(row.code)}）</strong><span class="signal-tag">${escapeHtml(active?(row.status||tPhaseLabel(row.phase)):'历史/待更新')}</span></div>
-  <p>${escapeHtml(active?(row.reason||row.status||'等待后端条件核验'):'休市、数据过期或观察未启用，不沿用旧价位作为实时做T条件。'+(row.last_status?' 上轮状态：'+row.last_status:''))}</p>
-  <div class="t-price-grid"><div><span>最新参考</span><b>${priceText(price)}</b></div><div><span>分时均价</span><b>${priceText(active?row.vwap:null)}</b></div><div><span>${row.phase==='sell_ready'?'高抛参考':'高抛观察门槛'}</span><b>${priceText(active?row.target_sell:null)}</b></div><div><span>${row.cycle_id?'接回观察上限':'实际T卖出后才看接回'}</span><b>${priceText(active&&row.cycle_id?row.target_buy:null)}</b></div></div>
-  <div class="signal-fields"><span>条件通过的T数量 <strong>${quantity===null?'—（待核验）':format(quantity,0)}</strong></span><span>假设回落的毛价差 <strong>${money(gross)}</strong></span><span>预估往返费用 <strong>${money(active?row.estimated_roundtrip_fee:null)}</strong></span><span>扣费后估算（未扣额外滑点） <strong>${money(net)}</strong></span></div>
-  ${active?`<div class="signal-fields"><span>已记录可卖 <strong>${row.available_quantity==null?'待核验':format(row.available_quantity,0)+'份'}</strong></span><span>T测算上限（非委托量） <strong>${row.t_capacity==null?'待核验':format(row.t_capacity,0)+'份'}</strong></span></div>`:''}
+  <p>${escapeHtml(active?(row.reason||row.status||'等待后端条件核验'):status+'，不沿用旧价位作为实时做T条件。'+(row.last_status?' 上轮状态：'+row.last_status:''))}</p>
+  <div class="t-price-grid"><div><span>最新参考</span><b>${priceText(price)}</b></div><div><span>分时均价</span><b>${priceText(active?row.vwap:null)}</b></div><div><span>${inCycle?'实际卖出价':row.phase==='sell_ready'?'高抛参考':'高抛观察门槛'}</span><b>${priceText(active?(inCycle?row.sell_price:row.opening_price_floor??row.target_sell):null)}</b></div><div><span>${inCycle?'风控接回上限':'试算接回上限（假设卖出）'}</span><b>${priceText(active?(inCycle?row.target_buy:row.cost_buyback_cap):null)}</b></div></div>
+  ${modeled?`<div class="signal-fields"><span>${inCycle?'本轮':'试算'}保本接回价 <strong>${priceText(row.break_even_buy_price)}</strong></span><span>${format(row.break_even_quantity,0)} 股／份保本价差 <strong>${format(row.break_even_gap,4)} 元／股或份</strong></span><span>${escapeHtml(feeLabel)}</span></div>`:''}
+  <div class="signal-fields"><span>条件通过的T数量 <strong>${quantity===null?'—（待核验）':format(quantity,0)}</strong></span><span>${inCycle?'按现价接回的毛价差':'假设回落至分时均价的毛价差'} <strong>${money(gross)}</strong></span><span>预计往返费用 <strong>${feesPending?'待核验':money(active?row.estimated_roundtrip_fee:null)}</strong></span><span>扣费后估算（未扣额外滑点） <strong>${money(net)}</strong></span></div>
+  ${active?`<div class="signal-fields">${inCycle?`<span>实际卖出后尚未接回 <strong>${row.remaining_quantity==null?'待核验':format(row.remaining_quantity,0)+' 股／份'}</strong></span>`:`<span>已核对可卖 <strong>${row.available_quantity==null?'待核验':format(row.available_quantity,0)+' 股／份'}</strong></span><span>T测算数量上限 <strong>${row.t_capacity==null?'待核验':format(row.t_capacity,0)+' 股／份'}</strong></span>`}<span>费用与滑点预留 <strong>${money(row.fee_reserve)}</strong></span><span>毛价差风控门槛 <strong>${money(row.minimum_gross)}</strong></span></div>`:''}
+  ${blockerList}
   ${checklist}
-  ${modeled?`<div class="signal-fields"><span>${format(row.break_even_quantity,0)} 股／份保本价差 <strong>${format(row.break_even_gap,4)} 元／股或份</strong></span><span>估算保本回补价上限 <strong>${priceText(row.break_even_buy_price)}</strong></span><span>${feeLabel}</span></div>`:''}
-  ${blockers.length&&!checks.length?'<ul class="t-blockers">'+blockers.map(x=>`<li>${escapeHtml(x)}</li>`).join('')+'</ul>':''}<small>${active?'报价时间 '+escapeHtml(row.quote_asof||'待核验')+' · 完整分钟截至 '+escapeHtml(row.minute_asof||'待核验')+'。':''}参考门槛不是委托；跌了不等于该接回，卖出也不保证能接回。${row.cycle_id?'本轮 '+escapeHtml(row.cycle_id):'尚无本轮实际T卖出记录时，不提供接回任务。'}</small></article>`;
+  <small>${active?'报价时间 '+escapeHtml(row.quote_asof||'待核验')+' · 完整分钟截至 '+escapeHtml(row.minute_asof||'待核验')+'。'+cycleNote:''}</small></article>`;
  }).join(''):'<p class="tip">尚无可核验的做T观察。请等待分钟行情与本地持仓匹配；不会用演示价格补齐。</p>';
  const availability=Array.isArray(d.availability)?d.availability:Object.entries(d.availability||{}).map(([code,x])=>({...x,code}));
  $('t-availability-list').innerHTML=availability.length?'<h4>已记录的可卖数量（非券商实时同步）</h4>'+table(['代码','核对时间','来源','记录可卖数量'],availability.map(x=>tr([escapeHtml(x.code),escapeHtml(x.confirmed_at||x.date||'待核验'),x.source==='broker_screenshot'?'当日持仓截图':'手动核对',format(x.available_quantity,0)])))+'<p class="tip">当日截图仅在持仓、成本和现金匹配时复用；之后若有成交或挂单冻结，请重新核对可卖数量。</p>':'<p class="tip">尚未确认今日可卖数量；只展示观察，不核定可执行股数。</p>';

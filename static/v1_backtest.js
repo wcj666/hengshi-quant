@@ -209,7 +209,7 @@ function renderCurve(rows) {
   if (visible) selectEquityDay();
 }
 
-function renderProvenance(meta, summary) {
+function renderProvenance(meta, summary, currentParameterNote) {
   const cost = meta.costs ?? {};
   const fields = [
     ['行情来源', meta.source],
@@ -219,8 +219,16 @@ function renderProvenance(meta, summary) {
     ['数据包 SHA-256', meta.bundle_sha256, 'digest'],
     ['引擎 SHA-256', meta.engine_sha256, 'digest'],
   ];
-  if (Number.isFinite(cost.commission_rate) && Number.isFinite(cost.minimum_commission)) {
-    fields.push(['佣金假设', `${percent(cost.commission_rate * 100)} · 每笔最低 ${money(cost.minimum_commission)}`]);
+  if (meta.rule_source) {
+    fields.push(['规则来源', meta.rule_source === 'account' ? '本机生效的实盘参数' : '初始化默认值']);
+  }
+  for (const [kind, label] of [['stock', '股票'], ['etf', '股票ETF']]) {
+    const terms = cost.broker_terms?.[kind];
+    if (terms) {
+      fields.push([`${label}券商佣金`, `万 ${terms.commission_per_10k} · 每笔最低 ${money(terms.minimum_commission)}`]);
+    } else if (Number.isFinite(cost.commission_rate) && Number.isFinite(cost.minimum_commission)) {
+      fields.push([`${label}模拟佣金`, `万 ${cost.commission_rate * 10000} · 每笔最低 ${money(cost.minimum_commission)}`]);
+    }
   }
   if (Number.isFinite(cost.prior_minute_participation)) {
     fields.push(['前一分钟成交量参与上限', percent(cost.prior_minute_participation * 100)]);
@@ -232,6 +240,7 @@ function renderProvenance(meta, summary) {
   }));
   byId('execution-model').textContent = meta.execution_model ?? '';
   const limitations = [...(meta.limitations ?? [])];
+  if (currentParameterNote) limitations.unshift(currentParameterNote);
   if (summary.missing_valuation_dates?.length) {
     const missing = summary.missing_valuation_dates;
     limitations.unshift(`缺估值 ${missing.length} 个交易日。最近日期 ${missing.slice(-6).join('、')}。`);
@@ -309,7 +318,10 @@ function renderReport(report) {
 
   const decisions = report.decisions ?? [];
   const decisionLimit = 40;
-  const counts = Object.entries(summary.rejection_counts ?? {});
+  const counts = [
+    ...Object.entries(summary.rejection_counts ?? {}),
+    ...Object.entries(summary.risk_blocker_counts ?? {}),
+  ];
   byId('decision-count').textContent = `共 ${integer(decisions.length)} 条检查记录` +
     (decisions.length > decisionLimit ? `，显示最近 ${decisionLimit} 条。` : '。');
   byId('rejection-counts').hidden = counts.length === 0;
@@ -319,7 +331,7 @@ function renderReport(report) {
   renderTable('decisions', decisions.slice(-decisionLimit).reverse().map(row => [
     clock(row), row.code, reasonLabel(row.reason), [reasonLabel(row.detail), 'wrap-cell'],
   ]), 4, '本次回测没有未成交或数据待核验记录');
-  renderProvenance(meta, summary);
+  renderProvenance(meta, summary, report.current_parameter_note);
 }
 
 async function refresh() {

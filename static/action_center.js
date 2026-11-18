@@ -89,21 +89,28 @@ function renderT(t) {
   const values = [];
   if (t.cycle) {
     values.push(metric('实际卖出均价', price(t.sell_price)), metric('尚未接回', quantity(t.remaining_quantity)));
-    if (t.buyback_cap != null) values.push(metric('接回最高参考价', price(t.buyback_cap)));
+    if (t.buyback_cap != null) values.push(metric('接回最高参考价（风控）', price(t.buyback_cap)));
   } else if (t.opening_price_floor != null) {
     values.push(metric('分时均价', price(t.vwap)), metric('按成本推算的高抛参考门槛', price(t.opening_price_floor)));
+    if (t.cost_buyback_cap != null) values.push(metric('试算接回上限（假设卖出）', price(t.cost_buyback_cap)));
   }
+  if (!t.cycle && t.available_quantity != null) {
+    values.push(metric('已核对可卖', quantity(t.available_quantity)));
+    if (t.minimum_spread == null && t.t_capacity != null) values.push(metric('T测算数量上限', quantity(t.t_capacity)));
+  }
+  if (t.break_even_buy_price != null) values.push(metric(t.cycle ? '本轮保本接回价' : '试算保本接回价', price(t.break_even_buy_price)));
   if (t.minimum_spread != null) {
     values.push(metric('至少需要的价差（元/股或份）', price(t.minimum_spread)),
                 metric('本次测算数量', quantity(t.break_even_quantity)));
   }
   const cost = t.minimum_gross == null ? '' :
-    '<p>毛价差门槛 ' + amount(t.minimum_gross) + '，其中往返费用测算 ' +
-    amount(t.estimated_roundtrip_fee) + '、滑点等缓冲 ' + amount(t.extra_cost_buffer) +
-    (t.fee_basis?.includes('reserve') ? '。至少一边费用暂按预留算。' : '。') + '</p>';
+    '<p>毛价差风控门槛 ' + amount(t.minimum_gross) + ' · 费用与滑点预留 ' + amount(t.fee_reserve) +
+    ' · 预计往返费用 ' + (t.fee_basis?.includes('reserve')
+      ? '待核验，按 ' + amount(t.fee_coverage_assumption) + ' 覆盖试算' : amount(t.estimated_roundtrip_fee)) + '。</p>';
   const distance = t.distance_to_cap > 0 ?
     '<p>现价高于接回上限 ' + price(t.distance_to_cap) + ' 元，等待；尾盘不追价接回。</p>' : '';
-  const checks = (t.checks || []).map(check => check.detail).filter(detail => detail && detail !== t.reason);
+  const checks = [...new Set([...(t.blockers || []), ...(t.checks || []).map(check => check.detail)])]
+    .filter(detail => detail && detail !== t.reason);
   return '<div class="action-t"><h4>做 T · ' + esc(t.status) + '</h4>' +
     (values.length ? '<dl>' + values.join('') + '</dl>' : '') + cost + distance +
     (t.reason ? '<p>' + esc(t.reason) + '</p>' : '') + list(checks) + '</div>';

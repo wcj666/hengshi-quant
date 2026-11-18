@@ -40,7 +40,7 @@ SIM_PARTICIPATION = .10
 BACKTEST_ENGINE_FILES = (
     'v1_backtest.py', 'v1_backtest_data.py', 'v1_backtest_report.py',
     'strategy_setup.py', 'strategy_v1.py', 'strategy_defaults.py', 'risk_engine.py',
-    'trade_levels.py', 'quote_health.py', 'pnl_engine.py',
+    'trade_levels.py', 'quote_health.py', 'pnl_engine.py', 'v1_execution.py', 't_costs.py', 'replay_parameters.py',
 )
 
 

@@ -4,6 +4,8 @@ from tempfile import TemporaryDirectory
 from unittest import TestCase, main
 from unittest.mock import patch
 
+from reminder_policy import compare_live_parameters
+from replay_parameters import load_account_profile
 from v1_backtest import run_backtest
 from v1_backtest_data import demo_bundle
 from v1_validation import PERIOD_KEYS, check_windows, evaluate, save_comparison
@@ -71,6 +73,31 @@ class ChronologicalEvaluationTests(TestCase):
 
         with patch("v1_validation.run_backtest", side_effect=altered), self.assertRaisesRegex(ValueError, "不一致"):
             evaluate(self.bundle, self.windows)
+
+    def test_replay_uses_account_parameters_and_each_assets_fee_source(self):
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            out = root / "output"
+            out.mkdir()
+            (root / "config.json").write_text(json.dumps({
+                "strategy_v1": {"enabled": True, "exit_mode": "price_first", "max_position_pct": 12},
+                "t_settings": {"enabled": True, "max_fraction": .2, "etf_deviation_pct": .55},
+            }))
+            (out / "t_ledger.json").write_text(json.dumps({
+                "fee_model": {"stock": {"commission_per_10k": 4, "minimum_commission": 3}},
+            }))
+            profile = load_account_profile(out)
+            result = evaluate(self.bundle, self.windows, baseline_code="600000", profile=profile)
+            report_meta = {**result["meta"], "demo": False}
+            self.assertIsNone(compare_live_parameters(out, report_meta))
+            (out / "t_ledger.json").unlink()
+            self.assertIn("券商费率已变化", compare_live_parameters(out, report_meta))
+        meta = result["meta"]
+        self.assertEqual(meta["rules"]["max_position_pct"], 12)
+        self.assertEqual(meta["t_settings"]["max_fraction"], .2)
+        self.assertEqual(meta["fee_sources"], {"stock": "broker_terms", "etf": "simulation"})
+        self.assertIn("12%", result["reminder_validation"]["meta"]["baseline_label"])
+        self.assertEqual(result["reports"]["development"]["fills"][0]["commission"], 3.01)
 
     def test_new_publication_keeps_previous_run_reports(self):
         result = evaluate(self.bundle, self.windows)

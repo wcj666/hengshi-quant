@@ -114,12 +114,32 @@ class TRuntimeTests(unittest.TestCase):
         (self.root/'config.json').write_text(json.dumps(self.cfg));client=create_app(self.root).test_client();h={'Host':'localhost','X-CSRF-Token':CSRF}
         self.avail();book=tr.ledger(self.out,self.cfg)
         state={'config_hash':json_hash(self.cfg),'fetch_finished_at':self.now.isoformat(),'mode':'live','market_session':True,'calendar_ok':True,'risk':{'valid':True},'quote_health':{'block_trade_signals':False},
-               't_observe':{'ledger_revision':book['revision'],'rows':[{'code':'600406','quantity':100}],'signals':[{'category':'t'}]},'trade_signals':[{'category':'t'}],'new_trade_signals':[{'category':'t'}]}
+               't_observe':{'ledger_revision':book['revision'],'rows':[{'code':'600406','quantity':100,'cost_buyback_cap':20.60}],'signals':[{'category':'t'}]},'trade_signals':[{'category':'t'}],'new_trade_signals':[{'category':'t'}]}
         storage.write(self.out/'intraday_status.json',state)
         self.assertFalse(client.get('/api/t-observe',headers=h).json['stale'])
         self.sell()
         r=client.get('/api/t-observe',headers=h).json;self.assertTrue(r['stale']);self.assertEqual(r['signals'],[]);self.assertIsNone(r['rows'][0]['quantity'])
+        self.assertNotIn('cost_buyback_cap',r['rows'][0])
+        self.assertIn('做T台账已更新',r['status'])
         self.assertEqual(client.get('/api/intraday',headers=h).json['trade_signals'],[])
+    def test_per_symbol_minute_expiry_removes_trade_hint_and_explains_block(self):
+        (self.root/'config.json').write_text(json.dumps(self.cfg))
+        book=tr.ledger(self.out,self.cfg)
+        timestamp=self.now.isoformat()
+        minute=(self.now-timedelta(minutes=1)).isoformat()
+        stale=(self.now-timedelta(seconds=91)).isoformat()
+        row={'code':'600406','quantity':100,'tradable':True,'quote_asof':timestamp,
+             'minute_asof':minute,'minute_source_at':stale,'target_buy':20.60}
+        state={'config_hash':json_hash(self.cfg),'fetch_finished_at':timestamp,'mode':'live','market_session':True,
+               'calendar_ok':True,'risk':{'valid':True},'quote_health':{'block_trade_signals':False},
+               't_observe':{'ledger_revision':book['revision'],'rows':[row],
+                            'signals':[{'id':'t','code':'600406','trigger':'buyback_ready','category':'t'}]}}
+        storage.write(self.out/'intraday_status.json',state)
+        data=create_app(self.root).test_client().get('/api/t-observe').json
+        self.assertFalse(data['stale'])
+        self.assertFalse(data['signals'])
+        self.assertNotIn('target_buy',data['rows'][0])
+        self.assertIn('分钟数据已过期',data['rows'][0]['reason'])
     def test_api_csrf_and_no_automatic_portfolio_changes(self):
         (self.root/'config.json').write_text(json.dumps(self.cfg));client=create_app(self.root).test_client();h={'Host':'localhost','X-CSRF-Token':CSRF}
         terms={'kind':'stock','commission_per_10k':5,'minimum_commission':None}

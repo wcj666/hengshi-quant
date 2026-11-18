@@ -5,17 +5,19 @@ import argparse
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP
+from decimal import Decimal, ROUND_HALF_UP
 import hashlib
 import json
 from pathlib import Path
 
 import pandas as pd
 
+from replay_parameters import ASSET_KINDS, broker_terms, load_account_profile, normalize_rules
 from risk_engine import compute
-from strategy_defaults import BACKTEST_ENGINE_FILES, SIMULATED_COSTS, SIM_PARTICIPATION, initial_v1_rules
+from strategy_defaults import BACKTEST_ENGINE_FILES, SIMULATED_COSTS, SIM_PARTICIPATION
 from strategy_setup import CN, build_setup
 from strategy_v1 import strategy_prefs
+from v1_execution import entry_economics, execution_fee, execution_price, normalize_execution_costs
 from v1_backtest_data import MINUTE_ENDS, audit_coverage, demo_bundle, load_bundle, validate_bundle
 from v1_backtest_report import save_report, summarize
 
@@ -30,7 +32,9 @@ DEFAULT_COSTS = {**SIMULATED_COSTS, 'prior_minute_participation': SIM_PARTICIPAT
 def simulation_costs(overrides=None):
     if overrides is not None and not isinstance(overrides, dict):
         raise ValueError('回放费用参数须为键值对象')
-    model = {**DEFAULT_COSTS, **(overrides or {})}
+    values = dict(overrides or {})
+    terms = values.pop('broker_terms', None)
+    model = {**DEFAULT_COSTS, **values}
     if set(model) != set(DEFAULT_COSTS):
         raise ValueError('存在未知费用参数')
     for key, value in model.items():
@@ -39,7 +43,37 @@ def simulation_costs(overrides=None):
             raise ValueError(f'费用或参与率参数无效：{key}')
     if model['slippage_rate'] >= 1:
         raise ValueError('滑点率须低于100%')
+    if terms is not None:
+        confirmed = broker_terms(terms)
+        if not isinstance(terms, dict) or set(confirmed) != set(terms):
+            raise ValueError('股票或ETF券商费率参数无效')
+        model['broker_terms'] = confirmed
     return model
+
+
+def effective_fee_terms(model):
+    fallback = {'commission_per_10k': model['commission_rate'] * 10_000,
+                'minimum_commission': model['minimum_commission']}
+    return {kind: model.get('broker_terms', {}).get(kind, fallback) for kind in ASSET_KINDS}
+
+
+def fee_sources(model):
+    return {kind: 'broker_terms' if kind in model.get('broker_terms', {}) else 'simulation'
+            for kind in ASSET_KINDS}
+
+
+def fee_source_note(model):
+    sources = fee_sources(model)
+    labels = {'stock': '股票', 'etf': '股票ETF'}
+    return '；'.join(f"{labels[kind]}{'采用已录入券商费率' if source == 'broker_terms' else '采用模拟费用（券商费率缺失）'}"
+                    for kind, source in sources.items()) + '。滑点按回放模型估算。'
+
+
+def execution_model(model):
+    return normalize_execution_costs(effective_fee_terms(model), model['slippage_rate'],
+                                     stock_sell_stamp_rate=model['stock_sell_stamp_rate'],
+                                     stock_transfer_rate=model['stock_transfer_rate'],
+                                     fee_rounding='ceil' if model.get('broker_terms') else 'half_up')
 
 
 def money(value):
@@ -52,19 +86,15 @@ def execution_time(day, label, *, open_of_bar=False):
 
 
 def try_price(reference, kind, side, slippage):
-    tick = Decimal('0.001' if kind == 'etf' else '0.01')
-    sign = 1 if side == 'buy' else -1
-    raw = Decimal(str(reference)) * (1 + sign * Decimal(str(slippage)))
-    rounding = ROUND_CEILING if side == 'buy' else ROUND_FLOOR
-    return float((raw / tick).to_integral_value(rounding=rounding) * tick)
+    return execution_price(reference, kind, side, slippage)
 
 
-def costs_for(kind, side, notional, model):
-    commission = money(max(model['minimum_commission'], notional * model['commission_rate']))
+def costs_for(kind, side, notional, model, *, execution_costs=None):
+    fee_basis = execution_model(model) if execution_costs is None else execution_costs
+    fees = execution_fee(kind, side, notional, fee_basis)
     stamp = money(notional * model['stock_sell_stamp_rate']) if kind == 'stock' and side == 'sell' else 0.0
     transfer = money(notional * model['stock_transfer_rate']) if kind == 'stock' else 0.0
-    return dict(commission=commission, stamp_tax=stamp, transfer=transfer,
-                fees=money(commission + stamp + transfer))
+    return dict(commission=money(fees - stamp - transfer), stamp_tax=stamp, transfer=transfer, fees=fees)
 
 
 def round_lot(quantity):
@@ -101,7 +131,7 @@ class Position:
 
 
 class Replay:
-    def __init__(self, bundle, start, end, initial_cash, costs, *, disabled_profit_targets=()):
+    def __init__(self, bundle, start, end, initial_cash, costs, *, rules=None, disabled_profit_targets=()):
         self.bundle = bundle
         self.symbols = bundle['securities']
         self.calendar = bundle['calendar']
@@ -112,6 +142,7 @@ class Replay:
         self.start_index = self.calendar.index(start)
         self.end_index = self.calendar.index(end)
         self.cost_model = simulation_costs(costs)
+        self.execution_costs = execution_model(self.cost_model)
         if (not isinstance(disabled_profit_targets, (list, tuple, set, frozenset))
                 or any(target not in PROFIT_TARGETS for target in disabled_profit_targets)):
             raise ValueError('退出对照只能关闭第一或第二止盈')
@@ -135,8 +166,9 @@ class Replay:
         self.budget_locked = False
         self.observed_intraday_drawdown = 0.0
         self.technical_signal_count = 0
-        self.rules = initial_v1_rules()
+        self.rules = normalize_rules(rules)
         self.settings = strategy_prefs({'strategy_v1': self.rules})
+        self.opens_today = 0
 
     @staticmethod
     def daily_frame(records, fields):
@@ -145,11 +177,14 @@ class Replay:
             frame['complete'] = [row.get('complete', True) for row in records]
         return frame
 
-    def note(self, day, code, reason, *, at=None, detail=None):
+    def note(self, day, code, reason, *, at=None, detail=None, blockers=None):
         key = (day, code, reason)
         if key not in self.seen_decisions:
             self.seen_decisions.add(key)
-            self.decisions.append(dict(date=day, code=code, at=at, reason=reason, detail=detail))
+            decision = dict(date=day, code=code, at=at, reason=reason, detail=detail)
+            if blockers:
+                decision['blockers'] = blockers
+            self.decisions.append(decision)
 
     def reminder(self, kind, code, stamp, *, opened_on=None, target_quantity=None):
         day = stamp.date().isoformat()
@@ -187,6 +222,8 @@ class Replay:
         return rows
 
     def setups_for(self, index):
+        if not self.rules['enabled'] or self.rules['execution_mode'] == 'exit_only':
+            return {}
         if index == 0:
             for code in self.symbols:
                 self.note(self.calendar[index], code, 'signal_data_missing', detail='交易日历未覆盖前一交易日')
@@ -246,7 +283,7 @@ class Replay:
 
     def record_fill(self, code, kind, side, quantity, reference, price, at, label, reason, *, signal_at=None, signal_date=None):
         notional = money(price * quantity)
-        charges = costs_for(kind, side, notional, self.cost_model)
+        charges = costs_for(kind, side, notional, self.cost_model, execution_costs=self.execution_costs)
         sign = 1 if side == 'sell' else -1
         self.cash = money(self.cash + sign * notional - charges['fees'])
         fill = dict(sequence=len(self.fills) + 1, date=at.date().isoformat(), at=at.isoformat(),
@@ -269,10 +306,11 @@ class Replay:
             'trade_plans': {p.code: {**p.plan, 'stop_loss': p.stop} for p in self.positions.values()} | {code: plan},
             'strategy_v1': self.rules,
         }
-        account = dict(initialized=True, verified=True, needs_reconcile=False, opens_today=0,
+        account = dict(initialized=True, verified=True, needs_reconcile=False, opens_today=self.opens_today,
                        paused=self.budget_locked or index <= self.pause_through, high_water=self.high_water,
                        drawdown=money(self.high_water - equity), adjusted_equity=equity, net_external_flow=0.0)
         result = compute(cfg, prices, fresh=True, strategy_account=account,
+                         execution_costs=self.execution_costs,
                          watch_quotes=[dict(code=code, price=price, asset_type=kind, name=plan['name'])])
         return result['sizing'][0], result['available_new_risk']
 
@@ -321,22 +359,18 @@ class Replay:
                 'review': {key: review[key] for key in REVIEW_FIELDS}, 'equity_etf': review.get('equity_etf')}
         sized, available_risk = self.risk_quantity(code, kind, plan, prices, price, equity, index)
         if not sized['max_buy_shares']:
-            self.note(day, code, 'risk_blocked', at=at, detail=sized['reason'])
+            self.note(day, code, 'risk_blocked', at=at, detail=sized['reason'], blockers=sized['blockers'])
             self.block_reminder(reminder, 'risk_blocked')
             return False
         qty = min(sized['max_buy_shares'], round_lot(previous['volume'] * self.cost_model['prior_minute_participation']))
-        stop_fill = try_price(levels['stop_loss'], kind, 'sell', tick_slippage)
-        target_fill = try_price(levels['take_profit_1'], kind, 'sell', tick_slippage)
         while qty >= 100:
-            buy_fee = costs_for(kind, 'buy', qty * price, self.cost_model)['fees']
-            stop_fee = costs_for(kind, 'sell', qty * stop_fill, self.cost_model)['fees']
-            roundtrip = money(buy_fee + stop_fee)
-            risk = money(qty * (price - levels['stop_loss']) +
-                         max(self.settings['fee_reserve'], roundtrip + qty * (levels['stop_loss'] - stop_fill)))
-            target_fee = costs_for(kind, 'sell', qty * target_fill, self.cost_model)['fees']
-            reward = qty * (target_fill - price) - buy_fee - target_fee
+            economics = entry_economics(kind, qty, price, levels['stop_loss'], levels['take_profit_1'],
+                                        self.settings['fee_reserve'], self.execution_costs)
+            buy_fee = economics['expected_entry_fee']
+            risk = economics['total_planned_risk']
+            reward_risk = economics['reward_risk']
             if (qty * price + buy_fee <= self.cash and risk <= min(self.settings['per_trade_risk'], available_risk)
-                    and reward >= self.settings['min_reward_risk'] * risk):
+                    and reward_risk is not None and reward_risk + 1e-10 >= self.settings['min_reward_risk']):
                 trade = self.record_fill(code, kind, 'buy', qty, reference, price, now, label, 'breakout',
                                          signal_at=now.isoformat(), signal_date=setup['signal_date'])
                 trade.update(initial_risk=risk, stop_loss=levels['stop_loss'],
@@ -351,7 +385,7 @@ class Replay:
         self.block_reminder(reminder, 'round_lot_cost_or_depth')
         return False
 
-    def exit_candidate(self, position, bar):
+    def exit_candidate(self, position, bar, index):
         if position.stop_signal_at:
             return 'stop_loss', position.quantity
         if 'take_profit_2' not in self.disabled_profit_targets and bar['high'] >= position.plan['take_profit_2']:
@@ -360,6 +394,17 @@ class Replay:
         if ('take_profit_1' not in self.disabled_profit_targets and remaining > 0
                 and bar['high'] >= position.plan['take_profit_1']):
             return 'take_profit_1', remaining
+        if self.rules['exit_mode'] == 'time_first':
+            age = index - self.calendar.index(position.bought_on) + 1
+            if age >= 10:
+                return 'time_10', position.quantity
+            if age > 5:
+                day5 = self.calendar[index - age + 5]
+                daily = self.histories[position.code]
+                row = daily.loc[(daily['date'] == day5) & daily['complete'], 'close']
+                if (not row.empty and row.iloc[0] - position.entry_price
+                        < position.entry_price - position.plan['stop_loss']):
+                    return 'time_5', position.quantity
         return None
 
     def observe_entries(self, day, label, setups, current, unavailable):
@@ -383,7 +428,7 @@ class Replay:
         day = self.calendar[index]
         now = execution_time(day, label, open_of_bar=True)
         code = position.code
-        candidate = self.exit_candidate(position, previous)
+        candidate = self.exit_candidate(position, previous, index)
         if candidate is None:
             return
         reason, quantity = candidate
@@ -401,7 +446,7 @@ class Replay:
             self.note(day, code, 'exit_price_limit', at=now.isoformat(), detail=reason)
             self.block_reminder(reminder, 'exit_price_limit')
             return
-        if reason != 'stop_loss' and price < position.plan[reason]:
+        if reason in PROFIT_TARGETS and price < position.plan[reason]:
             self.note(day, code, 'target_not_executable_at_next_open', at=now.isoformat(), detail=reason)
             self.block_reminder(reminder, 'target_not_executable_at_next_open')
             return
@@ -434,6 +479,7 @@ class Replay:
 
     def replay_day(self, index):
         day = self.calendar[index]
+        self.opens_today = 0
         setups = self.setups_for(index)
         self.technical_signal_count += len(setups)
         cancelled = {}
@@ -485,6 +531,7 @@ class Replay:
                     if code not in cancelled and code in previous and code in current and code not in broken:
                         if self.buy(index, label, code, setup, sessions[code], previous[code], current[code], opening_prices):
                             opened_code = code
+                            self.opens_today += 1
                             break
             # Read high, low, close and volume only once this bar is complete.
             for code, position in self.positions.items():
@@ -496,7 +543,7 @@ class Replay:
                     position.stop_signal_at = stamp.isoformat()
                     if position.bought_on == day:
                         self.note(day, code, 't_plus_one', at=position.stop_signal_at, detail='止损已触发，等待可卖')
-                candidate = self.exit_candidate(position, bar)
+                candidate = self.exit_candidate(position, bar, index)
                 if candidate:
                     kind, quantity = candidate
                     signal_stamp = datetime.fromisoformat(position.stop_signal_at) if position.stop_signal_at else stamp
@@ -542,10 +589,10 @@ class Replay:
         return self
 
 
-def run_backtest(bundle, start, end, initial_cash=100000.0, *, bundle_sha256=None, costs=None,
+def run_backtest(bundle, start, end, initial_cash=100000.0, *, bundle_sha256=None, costs=None, rules=None,
                  disabled_profit_targets=()):
     validate_bundle(bundle)
-    simulation = Replay(bundle, start, end, initial_cash, costs,
+    simulation = Replay(bundle, start, end, initial_cash, costs, rules=rules,
                         disabled_profit_targets=disabled_profit_targets).run()
     summary = summarize(simulation.initial_cash, simulation.equity_curve, simulation.fills,
                         simulation.closed_trades, bundle['securities'], simulation.decisions)
@@ -567,7 +614,10 @@ def run_backtest(bundle, start, end, initial_cash=100000.0, *, bundle_sha256=Non
                 bundle, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest(),
             'engine_sha256': hashlib.sha256(b''.join((ROOT / f).read_bytes() for f in BACKTEST_ENGINE_FILES)).hexdigest(),
             'price_basis': bundle['price_basis'], 'initial_cash': simulation.initial_cash,
-            'rules': simulation.settings, 'costs': simulation.cost_model, 'universe_size': len(bundle['securities']),
+            'rules': simulation.rules, 'costs': simulation.cost_model, 'universe_size': len(bundle['securities']),
+            'asset_kinds': sorted({item['type'] for item in bundle['securities'].values()}),
+            'fee_sources': fee_sources(simulation.cost_model), 'fee_source_note': fee_source_note(simulation.cost_model),
+            'rule_source': 'account' if rules is not None else 'defaults',
             'disabled_profit_targets': sorted(simulation.disabled_profit_targets),
             'reminder_counting': '买入按证券和信号交易日计一次，需完成分钟进入固定区间并通过当时的复核。'
                                  '止盈、止损按每次持仓及各类触发计一次。'
@@ -605,6 +655,8 @@ def main():
     parser.add_argument('--end', help='回放结束交易日 YYYY-MM-DD')
     parser.add_argument('--initial-cash', type=float, default=100000.0)
     parser.add_argument('--audit-only', action='store_true', help='只核对输入覆盖，输出JSON，不生成成交')
+    parser.add_argument('--account-output', type=Path, default=ROOT / 'output',
+                        help='实盘运行数据目录；回放读取同目录的券商费率及上一级的 config.json')
     parser.add_argument('--output', type=Path, default=ROOT / 'output' / 'v1_backtest')
     args = parser.parse_args()
     try:
@@ -627,7 +679,9 @@ def main():
             coverage = audit_coverage(bundle, start, end)
             print(json.dumps({'bundle_sha256': digest, **coverage}, ensure_ascii=False, indent=2))
             return
-        result = run_backtest(bundle, start, end, args.initial_cash, bundle_sha256=digest)
+        profile = load_account_profile(args.account_output) if args.bundle else None
+        params = {key: profile[key] for key in ('rules', 'costs')} if profile is not None else {}
+        result = run_backtest(bundle, start, end, args.initial_cash, bundle_sha256=digest, **params)
         save_report(result, args.output)
     except (ValueError, OSError) as exc:
         parser.error(str(exc))

@@ -273,8 +273,12 @@ def evaluate_entry(cfg, code, quote, snapshot, *, setup=None, now=None):
     if not strategy or strategy.get('can_open', strategy.get('new_entries_allowed', False)) is not True:
         blockers.append('V1账户状态未允许新增')
     account = snapshot.get('strategy_account')
-    if not isinstance(account, dict) or account.get('opens_today', 0) >= 1 or account.get('paused') or account.get('needs_reconcile'):
+    from strategy_v1 import strategy_prefs
+    if (not isinstance(account, dict) or account.get('opens_today', 0) >= strategy_prefs(cfg)['max_daily_opens']
+            or account.get('paused') or account.get('needs_reconcile')):
         blockers.append('当日新增已用、策略暂停或账户对账待完成')
+    if snapshot.get('entry_costs_stale'):
+        blockers.append('券商费用参数已更新，等待新一轮开仓测算')
     if plan.get('strategy_version') != '1.0' or plan.get('setup_verified') is not True:
         blockers.append('缺少已核验V1固定计划')
     if not plan.get('sector') or not all((plan.get('review') or {}).get(k) is True for k in ('fundamentals_ok', 'event_clear', 'corporate_action_clear', 'resistance_clear')):
@@ -309,9 +313,11 @@ def evaluate_entry(cfg, code, quote, snapshot, *, setup=None, now=None):
         return result
     prices = {str(r.get('code')).zfill(6): r.get('price') for r in snapshot.get('quotes', []) if r.get('held') and _number(r.get('price'))}
     computed = compute(cfg, prices, fresh=True, watch_quotes=[{'code': code, 'name': quote.get('name', code), 'price': price,
-                                                             'asset_type': quote.get('asset_type', 'stock')}], strategy_account=account)
+                                                             'asset_type': quote.get('asset_type', 'stock')}],
+                       strategy_account=account, execution_costs=snapshot.get('entry_execution_costs'))
     gate = computed.get('strategy') or {}
     size = next((s for s in computed.get('sizing', []) if str(s.get('code')).zfill(6) == code), {})
+    result['entry_economics'] = size
     if not computed.get('valid') or computed.get('over_budget') or gate.get('can_open', gate.get('new_entries_allowed', False)) is not True or (size.get('max_buy_shares') or 0) < 100:
         blockers.append(size.get('reason') or '最新账户重算未通过新增约束')
     else:

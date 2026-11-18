@@ -15,10 +15,11 @@ testAPI.drawAlerts({valid:false,alerts:[alert]});if(document.getElementById('str
 const observation={...alert,id:'observe',side:null,quantity:null,repeatable:false,deadline:Date.now()+120000};
 testAPI.drawAlerts({valid:true,alerts:[observation]});if(rings!==2)throw Error('observation silent');
 const wallNow=Date.now;Date.now=()=>wallNow()+61000;testAPI.drawAlerts({valid:true,alerts:[observation]});Date.now=wallNow;if(rings!==2)throw Error('observation repeated sound');
-const card={code:'159971',name:'测试',state:'buy',label:'买入复核',quantity:100,deadline:100,price:.71,thresholds:[{label:'买入触发',price:.700,max_price:.712,direction:'at_or_above',distance:-.01}],t:{cycle:true,sell_price:.75,remaining_quantity:100,buyback_cap:.71,deadline:90}};
+const card={code:'159971',name:'测试',state:'buy',label:'买入复核',quantity:100,deadline:100,price:.71,thresholds:[{label:'买入触发',price:.700,max_price:.712,direction:'at_or_above',distance:-.01}],t:{cycle:true,sell_price:.75,remaining_quantity:100,buyback_cap:.71,break_even_buy_price:.72,minimum_gross:40,fee_basis:['actual_sell','reserve'],fee_coverage_assumption:20,fee_reserve:20,blockers:['现金不足'],deadline:90}};
 const data={cards:[card],alerts:[{...alert,deadline:100}],deadline:200};
 const html=testAPI.renderCard(card,false);
 if(!html.includes('最高接受价 0.712')||!html.includes('接回最高参考价'))throw Error('price thresholds not visible');
+if(!html.includes('本轮保本接回价')||!html.includes('现金不足')||!html.includes('费用与滑点预留')||!html.includes('覆盖试算'))throw Error('T price and cost diagnostics missing');
 testAPI.expire(data,91);
 if(card.t.buyback_cap!=null||card.t.remaining_quantity!==100||card.quantity!==100)throw Error('T expiry should preserve actual inventory and other actions');
 testAPI.expire(data,101);

@@ -90,5 +90,30 @@ class ReminderPolicyTests(unittest.TestCase):
         later = NOW.replace(year=2027)
         self.assertEqual(policy.load_policy(self.output, CFG, now=later)['status'], 'pending')
 
+    def test_publish_rechecks_the_effective_profile_and_confirmed_fee_terms(self):
+        from replay_parameters import load_account_profile
+        from v1_backtest_data import demo_bundle
+        from v1_validation import PERIOD_KEYS, evaluate
+
+        bundle = demo_bundle()
+        bundle.update(demo=False, input_digests={'test_fixture': 'a' * 64})
+        cfg = {'strategy_v1': {'enabled': True, 'exit_mode': 'price_first', 'max_position_pct': 12},
+               't_settings': {'enabled': True, 'max_fraction': .2}}
+        windows = {key: (day, day) for key, day in zip(PERIOD_KEYS, bundle['calendar'][-3:])}
+        schedule = self.output / 't_ledger.json'
+        fees = {kind: {'commission_per_10k': 4, 'minimum_commission': minimum}
+                for kind, minimum in [('stock', 3), ('etf', 2)]}
+        schedule.write_text(json.dumps({'fee_model': fees}))
+        profile = load_account_profile(self.output, cfg)
+        result = evaluate(bundle, windows, profile=profile)
+        now = datetime(2024, 6, 20, 11, 30, tzinfo=CST)
+        self.assertTrue(policy.publish_evidence(self.output, cfg, bundle, result, now=now))
+        self.assertEqual(policy.load_policy(self.output, cfg, now=now)['status'], 'matched')
+        fees['stock']['minimum_commission'] = 4
+        schedule.write_text(json.dumps({'fee_model': fees}))
+        with self.assertRaisesRegex(ValueError, '费用口径未匹配'):
+            policy.publish_evidence(self.output, cfg, bundle, result, now=now)
+        self.assertEqual(policy.load_policy(self.output, cfg, now=now)['status'], 'pending')
+
 
 if __name__ == '__main__': unittest.main()

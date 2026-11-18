@@ -49,6 +49,19 @@ if(!html.includes('今日券商可卖数量未确认')||!html.includes('—（�
 if(!$('t-cycle-list').innerHTML.includes('尚无实际T卖出记录'))throw Error('ordinary reduction inferred as T cycle');
 ''')
 
+    def test_t_card_shows_break_even_and_stricter_limit_when_fees_are_unconfirmed(self):
+        self.run_js(r'''
+const row={code:'588170',name:'科创半导',cycle_id:'actual',phase:'buyback_blocked',remaining_quantity:1200,sell_price:.700,
+  price:.687,target_buy:.680,break_even_buy_price:.690,break_even_quantity:1000,break_even_gap:.010,
+  fee_basis:['actual_sell','reserve'],fee_coverage_assumption:12,fee_reserve:20,minimum_gross:40,
+  blockers:['接回后仓位超限'],checks:[{label:'回踩后企稳',passed:false,detail:'尚未连续回升'}]};
+renderTObserve({enabled:true,stale:false,rows:[row],cycles:[]});
+const html=$('t-observation-list').innerHTML;
+for(const text of ['本轮保本接回价','0.690','风控接回上限','0.680','按 ¥12.00 覆盖试算','费用与滑点预留','接回后仓位超限','尚未连续回升','实际卖出后尚未接回'])
+ if(!html.includes(text))throw Error('missing T diagnostic: '+text);
+if(html.includes('已核对可卖'))throw Error('reused oversold inventory as a buyback condition');
+''')
+
     def test_actual_sell_requires_confirmation_and_accepts_partial_fill_integer(self):
         self.run_js(r'''
 (async()=>{

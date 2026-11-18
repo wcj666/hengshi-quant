@@ -50,6 +50,15 @@ class THistoryReplayTests(unittest.TestCase):
         self.assertEqual(result['reminders']['sell_ready']['fill_rate_pct'], 100)
         self.assertEqual(result['reminders']['buyback_ready']['fill_rate_pct'], 100)
 
+    def test_configured_t_fraction_changes_t_replay_signals(self):
+        bundle, _, start, _ = example()
+        configured = {'enabled': True, 'max_fraction': .2}
+        result = evaluate_t_window(bundle, start, start, 100000, t_settings=configured)
+        self.assertTrue(result['covered'])
+        self.assertEqual(result['t_settings']['max_fraction'], .2)
+        self.assertEqual(result['reminders']['sell_ready']['triggers'], 0)
+        self.assertEqual(result['fills'], [])
+
     def test_missing_amount_blocks_coverage_instead_of_finding_zero_triggers(self):
         bundle, code, start, _ = example()
         bundle['securities'][code]['sessions'][start]['minutes'][45].pop('amount')

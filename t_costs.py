@@ -101,7 +101,8 @@ def roundtrip(kind, sell_price, quantity, reserve, model, samples, *, sell_fee=N
     cap = decimal(sell_price) - decimal(fees) / quantity
     cap = (cap / tick).to_integral_value(rounding=ROUND_FLOOR) * tick
     return {
-        'estimated_roundtrip_fee': fees, 'fee_basis': [sell_basis, buy_basis],
+        'estimated_roundtrip_fee': fees if not unknown else None,
+        'fee_coverage_assumption': fees, 'fee_basis': [sell_basis, buy_basis],
         'break_even_quantity': quantity, 'break_even_buy_price': float(cap) if cap > 0 else None,
         'break_even_gap': float(decimal(sell_price) - cap) if cap > 0 else None,
     }

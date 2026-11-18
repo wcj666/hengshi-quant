@@ -199,11 +199,12 @@
     sample.className = 'sample-type' + (demo ? ' demo' : '');
     sample.hidden = false;
     const status = byId('reminder-validation-status');
-    const warning = demo || !recommendations.length || recommendations.some(item => item.status === '待验证');
+    const warning = demo || Boolean(report.current_parameter_note) ||
+      !recommendations.length || recommendations.some(item => item.status === '待验证');
     status.classList.toggle('warn', warning);
     status.textContent = demo ? '合成样例用于检查回放流程，策略仍待验证。'
-      : warning ? '已读取历史回放。部分提醒缺少可用证据，仍待验证。'
-        : '已读取最近一次提醒验证结果。';
+      : report.current_parameter_note || (warning ? '已读取历史回放。部分提醒缺少可用证据，仍待验证。'
+        : '已读取最近一次提醒验证结果。');
     const source = [meta.source, datedNote(meta.generated_at)].filter(Boolean);
     byId('reminder-validation-source').textContent = source.join(' · ');
     renderWarnings(byId('reminder-validation-warnings'), meta.warnings ?? []);

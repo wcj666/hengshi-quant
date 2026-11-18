@@ -140,6 +140,7 @@ def summarize(initial_cash, equity_curve, fills, closed_trades, symbols, rejecti
         "by_asset_type": by_asset_type,
         "rejection_count": len(rejections),
         "rejection_counts": dict(sorted(Counter(item["reason"] for item in rejections).items())),
+        "risk_blocker_counts": dict(Counter(blocker for item in rejections for blocker in item.get("blockers", [])).most_common()),
         "metric_notes": {
             "annualized_return_pct": "按每年252个交易日折算，至少两个交易日且估值完整。",
             "max_drawdown": "按日末净值与期初现金计算，无法观察日内回撤。金额和比例各自取最大值。",

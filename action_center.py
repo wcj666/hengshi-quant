@@ -130,16 +130,18 @@ def t_card(row, cycle, price, mode):
               'reason': row.get('reason'), 'cycle': bool(cycle or row.get('cycle_id')),
               'remaining_quantity': remaining,
               'sell_price': cycle.get('sell_price') if cycle else row.get('sell_price'),
+              'blockers': row.get('blockers') or [],
               'checks': [c for c in row.get('checks', []) if c.get('passed') is not True
                          and (not (cycle or row.get('cycle_id')) or c.get('label') != '当日可卖底仓')]}
     if mode == 'exit_only':
-        result.update(status='退出休息，暂停做 T', reason=None, checks=[])
+        result.update(status='退出休息，暂停做 T', reason=None, checks=[], blockers=[])
         return result
     if price is None or not row:
         return result
-    result.update({k: row.get(k) for k in ('break_even_quantity', 'break_even_gap',
+    result.update({k: row.get(k) for k in ('break_even_quantity', 'break_even_gap', 'break_even_buy_price',
                   'minimum_spread', 'estimated_roundtrip_fee', 'fee_basis', 'minimum_gross',
-                  'extra_cost_buffer', 'vwap', 'opening_price_floor')})
+                  'fee_coverage_assumption', 'fee_reserve', 'vwap', 'opening_price_floor',
+                  'available_quantity', 't_capacity', 'cost_buyback_cap')})
     cap = positive(row.get('target_buy')) if result['cycle'] else None
     if cap is not None:
         result.update(buyback_cap=cap, distance_to_cap=round(max(0, price - cap), 8))

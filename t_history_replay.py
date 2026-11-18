@@ -8,10 +8,12 @@ import pandas as pd
 
 from price_review import review_price
 from quote_health import parse_provider_time
-from strategy_defaults import T_DEFAULTS, initial_v1_rules
+from replay_parameters import normalize_rules, t_rules
+from strategy_defaults import T_DEFAULTS
 from t_engine import _buyback_blockers, _restore_blockers, _risk_conflict, build_t_observations
-from v1_backtest import costs_for, execution_time, money, round_lot, simulation_costs, try_price
+from v1_backtest import effective_fee_terms, execution_model, execution_time, money, round_lot, simulation_costs, try_price
 from v1_backtest_data import MINUTE_ENDS
+from v1_execution import execution_fee
 
 
 PHASES = ('sell_ready', 'buyback_ready')
@@ -154,13 +156,14 @@ def _blocked(message, errors=None, examples=None):
 
 
 class TReplay:
-    def __init__(self, bundle, seeds, initial, old_close, costs, structures):
+    def __init__(self, bundle, seeds, initial, old_close, costs, structures, rules, t_settings):
         self.bundle = bundle
         self.seeds = seeds
         self.initial = self.high_water = initial
         self.costs = costs
-        self.rules = initial_v1_rules()
-        self.t_settings = T_DEFAULTS.copy()
+        self.execution_costs = execution_model(costs)
+        self.rules = rules
+        self.t_settings = t_settings
         self.structures = structures
         self.original = {code: row['quantity'] for code, row in seeds.items()}
         self.holdings = self.original.copy()
@@ -168,8 +171,7 @@ class TReplay:
         self.cash = self.initial_cash = money(initial - sum(qty * old_close[code] for code, qty in self.original.items()))
         self.events, self.fills, self.cycles = {}, [], {}
         self.equity_curve, self.baseline_curve = [], []
-        self.fee_model = {kind: {'commission_per_10k': costs['commission_rate'] * 10000,
-                                 'minimum_commission': costs['minimum_commission']} for kind in ('stock', 'etf')}
+        self.fee_model = effective_fee_terms(costs)
 
     def _value(self, qty, cash, prices):
         return money(cash + sum(q * prices[code] for code, q in qty.items()))
@@ -184,7 +186,8 @@ class TReplay:
                      for code, qty in self.holdings.items()]
         plans = {code: row['plan'] for code, row in self.seeds.items()}
         cfg = dict(cash=self.cash, positions=positions, trade_plans=plans,
-                   strategy_v1=self.rules, t_settings=self.t_settings)
+                   strategy_v1=self.rules, t_settings=self.t_settings,
+                   execution_preferences={'mode': self.rules['execution_mode']})
         breached = [code for code, qty in self.holdings.items()
                     if qty and prices[code] <= plans[code]['stop_loss']]
         stress = money(sum(max(0, prices[code] - plans[code]['stop_loss']) * qty + self.rules['fee_reserve']
@@ -242,8 +245,8 @@ class TReplay:
                 # Re-evaluate the live fee threshold at the modeled sell price,
                 # using the signal prefix VWAP and the shares that could fill.
                 if qty:
-                    notional = price * qty
-                    modeled_fees = sum(costs_for(kind, order, notional, self.costs)['fees']
+                    notional = money(price * qty)
+                    modeled_fees = sum(execution_fee(kind, order, notional, self.execution_costs)
                                        for order in ('sell', 'buy'))
                     reserve = max(signal['fee_reserve'], modeled_fees)
                     if (price - signal['vwap']) * qty < 2 * reserve:
@@ -254,10 +257,13 @@ class TReplay:
                 if qty >= 100 and not reason and _buyback_blockers(
                         cfg, position, context, risk, cycle, minute_books, qty, price, signal['fee_reserve']):
                     reason = 'risk'
-            fee = costs_for(kind, side, price * qty, self.costs)['fees']
             if qty < 100:
                 reason = reason or 'prior_minute_depth_or_inventory'
-            elif side == 'buy' and money(price * qty + fee) > self.cash:
+            if reason:
+                event['last_blocker'] = reason
+                continue
+            fee = execution_fee(kind, side, money(price * qty), self.execution_costs)
+            if side == 'buy' and money(price * qty + fee) > self.cash:
                 reason = reason or 'cash'
             if reason:
                 event['last_blocker'] = reason
@@ -314,7 +320,7 @@ class TReplay:
                                           cum_volume=totals[code][0] / 100, cum_amount=totals[code][1]))
             pending = []
             last_at = at
-            if index < 29 or label >= self.t_settings['last_open_time'] or not current:
+            if index < 29 or label >= T_DEFAULTS['last_open_time'] or not current:
                 continue
             quote = {code: self._quote(code, bar['close'], sessions[code], at) for code, bar in current.items()}
             data = {code: {'valid': True, 'source_timestamp': at.isoformat(), 'rows': bars}
@@ -342,13 +348,19 @@ class TReplay:
         self.baseline_curve.append(dict(date=day, equity=self._value(self.original, self.initial_cash, prices)))
 
 
-def evaluate_t_window(bundle, start, end, initial_cash, costs=None):
+def evaluate_t_window(bundle, start, end, initial_cash, costs=None, *, rules=None, t_settings=None):
     """Return one comparable T/hold trajectory, or a reason the evidence is insufficient."""
     calendar = bundle['calendar']
     if start not in calendar or end not in calendar or start > end:
         raise ValueError('做 T 回放区间须位于数据包交易日历内。')
     if not _positive(initial_cash) or initial_cash < .01:
         raise ValueError('做 T 回放初始资金须为有限正数。')
+    rules = normalize_rules(rules)
+    t_settings = t_rules({'t_settings': T_DEFAULTS if t_settings is None else t_settings})
+    if not t_settings['enabled']:
+        return _blocked('当前回放参数停用做 T。')
+    if not rules['enabled'] or rules['execution_mode'] == 'exit_only':
+        return _blocked('当前账户停用 V1 或处于退出休息模式，暂停做 T 回放信号。')
     try:
         seeds, source, seed_at = _seed(bundle, start)
     except ValueError as error:
@@ -370,7 +382,7 @@ def evaluate_t_window(bundle, start, end, initial_cash, costs=None):
     if errors:
         return _blocked('做 T 回放证据不完整，暂不计算区间可成交比例与收益。', errors, examples)
     model = simulation_costs(costs)
-    simulation = TReplay(bundle, seeds, money(initial_cash), previous, model, structures)
+    simulation = TReplay(bundle, seeds, money(initial_cash), previous, model, structures, rules, t_settings)
     completed = 0
     for day in window:
         simulation.run_day(day)
@@ -383,6 +395,7 @@ def evaluate_t_window(bundle, start, end, initial_cash, costs=None):
     unmatched = {code: quantity - simulation.holdings[code] for code, quantity in simulation.original.items()
                  if quantity > simulation.holdings[code]}
     return dict(covered=True, sample_count=completed, strategy=strategy, baseline=baseline,
+                t_settings=t_settings,
                 reminders=_summary_reminders(events), warnings=[], policy=list(POLICY), source=source,
                 seed_at=seed_at, initial_equity=simulation.initial, initial_cash_balance=simulation.initial_cash,
                 seed_positions=[dict(code=code, quantity=value['quantity'], **value['plan'])

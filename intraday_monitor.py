@@ -165,7 +165,7 @@ def example_quotes(cfg):
     return quotes,[]
 
 
-def evaluate(cfg, feed, *, demo=False,strategy_account=None):
+def evaluate(cfg, feed, *, demo=False,strategy_account=None,execution_costs=None):
     positions={code_str(p['code']):p for p in cfg.get('positions',[]) if int(p.get('quantity',0))>0}
     all_items={code_str(x['code']):x['name'] for x in cfg.get('watchlist',[])}
     watch_types={code_str(x['code']):x.get('type','stock') for x in cfg.get('watchlist',[])}
@@ -215,7 +215,8 @@ def evaluate(cfg, feed, *, demo=False,strategy_account=None):
     held_prices={code:r['price'] for code,r in quotes.items() if code in positions and r['price'] is not None}
     risk=compute(cfg,held_prices,fresh=all(code in held_prices for code in positions),strategy_account=strategy_account,
                  previous_closes=previous_closes,watch_quotes=[{'code':r['code'],'name':r['name'],'price':r['price'],'asset_type':r['asset_type']}
-                               for r in quotes.values() if r['asset_type'] in ('stock','etf')])
+                               for r in quotes.values() if r['asset_type'] in ('stock','etf')],
+                 execution_costs=execution_costs)
     if demo:
         from pnl_engine import calculate as calculate_pnl
         risk['pnl']=calculate_pnl(cfg,{},valid=False)
@@ -427,7 +428,12 @@ def single_cycle(*,mode,notify=False,force_demo=False,probe=False,interval=10):
         except Exception as exc:
             account={'initialized':False,'verified':False,'needs_reconcile':True,'error':'V1记录核验失败：'+type(exc).__name__}
             state['errors'].append(account['error'])
-    quotes,events,risk=evaluate(cfg,feed,demo=demo,strategy_account=account)
+    from v1_execution import normalize_execution_costs
+    from replay_parameters import read_broker_terms
+    costs = normalize_execution_costs(read_broker_terms(OUT)) if not demo and not probe else None
+    if costs is not None:
+        state['entry_execution_costs']=costs
+    quotes,events,risk=evaluate(cfg,feed,demo=demo,strategy_account=account,execution_costs=costs)
     if strategy.enabled(cfg):
         from strategy_setup import exit_review
         dates=strategy.calendar_dates(OUT)

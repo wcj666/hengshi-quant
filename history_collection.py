@@ -13,6 +13,7 @@ import re
 
 from etf_history_inputs import load_daily, refresh_daily
 from quote_health import parse_provider_time
+from replay_parameters import load_account_profile
 from reminder_validation import MIN_DAYS
 from strategy_runtime import CST, calendar_dates, read, write
 from v1_backtest import ROOT, run_backtest
@@ -188,16 +189,19 @@ def describe_positions(settings, daily, archives, bundle):
     return result
 
 
-def run_trial(bundle, settings, completed, work, *, start=None, end=None):
+def run_trial(bundle, settings, completed, work, *, start=None, end=None, profile=None):
     from t_history_replay import evaluate_t_window
 
     if not completed or not bundle['benchmark'] or any(not item['daily'] for item in bundle['securities'].values()):
         return {'status': '真实日线不足，等待数据'}
     start = start or completed[-min(4, len(completed))]
     end = end or completed[-1]
-    result = run_backtest(bundle, start, end, settings['initial_equity'])
+    params = {key: profile[key] for key in ('rules', 'costs')} if profile is not None else {}
+    result = run_backtest(bundle, start, end, settings['initial_equity'], **params)
     coverage = audit_coverage(bundle, start, end)
-    t_result = evaluate_t_window(bundle, start, end, settings['initial_equity'], result['meta']['costs'])
+    t_result = evaluate_t_window(bundle, start, end, settings['initial_equity'], result['meta']['costs'],
+                                 rules=result['meta']['rules'],
+                                 t_settings=profile['t_settings'] if profile is not None else None)
     scenario = bundle.get('t_replay') or {}
     if scenario.get('start_on', '') > end:
         t_result['warnings'] = [f'该历史区间早于已登记的实验起点 {scenario["start_on"]}，后续从起点开始积累。']
@@ -210,6 +214,8 @@ def run_trial(bundle, settings, completed, work, *, start=None, end=None):
         'label': '关注篮子的真实行情试跑。回顾性选样，不用于正式筛选。',
         'start': start, 'end': end, 'source': bundle['source'], 'coverage': coverage,
         'execution_verified': ready, 'summary': compact, 'decisions': result['decisions'],
+        'rules': result['meta']['rules'], 'costs': result['meta']['costs'],
+        'rule_source': result['meta']['rule_source'], 'fee_source_note': result['meta']['fee_source_note'],
         'technical_signal_count': summary['technical_signal_count'],
         'reminders': result['reminders'],
         'mechanical_evidence_note': '机械行情事实允许事后查证并保留真实核验时间；交易审核及实验底仓仍保留其实际设定时间。',
@@ -219,6 +225,7 @@ def run_trial(bundle, settings, completed, work, *, start=None, end=None):
             'day_or_range': f'{start} 至 {end}', 'report_url': TRIAL_URL,
             'summary': ('执行证据不全，净收益、回撤和成交比例暂不采用。' if not ready else
                         f'模拟成交 {summary["fill_count"]} 笔。仍需独立分段验证。') +
+                       ' ' + result['meta']['fee_source_note'] +
                        ((' 做 T：' + t_result['warnings'][0]) if not t_result['covered'] else '')}
 
 
@@ -259,8 +266,8 @@ def contiguous_windows(bundle, settings):
             for index, key in enumerate(PERIOD_KEYS)}, len(best)
 
 
-def auto_validate(bundle, settings, work, runtime_output):
-    from reminder_policy import _parameters, _version, publish_evidence
+def auto_validate(bundle, settings, work, runtime_output, *, cfg=None, profile=None):
+    from reminder_policy import _version, publish_evidence
     from v1_validation import evaluate, save_comparison
 
     windows, sessions = contiguous_windows(bundle, settings)
@@ -272,15 +279,13 @@ def auto_validate(bundle, settings, work, runtime_output):
                 if clock <= datetime.combine(date.fromisoformat(day), time(15, 5), CST)]
     bundle = {**bundle, 'universe': {day: list(bundle['securities']) for day in selected},
               'universe_source': f'事前登记的本地 ETF 研究篮子，登记 {settings["registered_at"]}'}
-    cfg_path = runtime_output.parent / 'config.json'
-    cfg = _read_dict(cfg_path) if cfg_path.is_file() else None
-    active_parameters = _parameters(runtime_output, cfg) if cfg is not None else None
-    digest = hashlib.sha256(json.dumps([bundle, windows, settings, _version(), active_parameters],
+    digest = hashlib.sha256(json.dumps([bundle, windows, settings, _version(), profile],
                                        sort_keys=True, allow_nan=False).encode()).hexdigest()
     state = _read_dict(work/'validation.json')
     if digest == state.get('digest'):
         return state['status']
-    result = evaluate(bundle, windows, settings['initial_equity'], baseline_code=settings.get('baseline_code'))
+    result = evaluate(bundle, windows, settings['initial_equity'], baseline_code=settings.get('baseline_code'),
+                      profile=profile)
     decisions = result['reminder_validation']['recommendations']
     qualified = any(item['status'] in ('验证通过', '移出强提醒候选') for item in decisions)
     status = {'status': '已完成自动分段' if qualified else '已分段，部分或全部仍待验证',
@@ -334,8 +339,11 @@ def collect(runtime_output, settings, work, now, *, lookback=4, fetch=True):
         warnings.append(f'做 T 研究场景已登记，起点 {scenario["start_on"]}。{detail}。'
                         f'虚拟期初净资产 ¥{settings["initial_equity"]:,.2f}。')
     bundle = build_bundle(daily, archives, completed, settings, evidence)
-    trial = run_trial(bundle, settings, completed, work)
-    validation = auto_validate(bundle, settings, work, runtime_output)
+    cfg_path = runtime_output.parent / 'config.json'
+    cfg = json.loads(cfg_path.read_text()) if cfg_path.is_file() else None
+    profile = load_account_profile(runtime_output, cfg) if cfg is not None else None
+    trial = run_trial(bundle, settings, completed, work, profile=profile)
+    validation = auto_validate(bundle, settings, work, runtime_output, cfg=cfg, profile=profile)
     return {'status': '已更新腾讯历史行情归档与证据检查', 'updated_at': now.isoformat(),
             'latest_completed_day': completed[-1], 'positions': describe_positions(settings, daily, archives, bundle),
             'warnings': warnings, 'evidence_url': '/api/backtest/history-evidence',

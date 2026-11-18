@@ -89,6 +89,7 @@ def _analyze_swing_v1(hist, cfg, code, *, position=None, quote=None, snapshot=No
         return result
     entry = evaluate_entry(cfg, code, quote, snapshot, setup=setup, now=now)
     result['blockers'] = entry['blockers']
+    result['entry_economics'] = entry.get('entry_economics')
     if entry['allowed']:
         result.update(action='buy', label='买入复核', tone='bull', max_buy_shares=entry['max_buy_shares'],
                       reward_risk=entry['reward_risk'], summary='完整日K形态、固定次日计划、实时账户与触发区间均通过；在券商核对后按限价和核定股数复核。')

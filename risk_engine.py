@@ -34,13 +34,14 @@ def risk_prefs(cfg):
     }
 
 
-def compute(cfg, quotes:dict[str,float]|None,fresh=False,watch_quotes=None,previous_closes=None,strategy_account=None):
+def compute(cfg, quotes:dict[str,float]|None,fresh=False,watch_quotes=None,previous_closes=None,strategy_account=None,
+            *,execution_costs=None):
     """Value complete quotes independently from V1's permission to add risk."""
     from strategy_v1 import enabled, compute_strategy
     if enabled(cfg):
         return compute_strategy(cfg,quotes,fresh=fresh,watch_quotes=watch_quotes,
                                 previous_closes=previous_closes,strategy_account=strategy_account,
-                                legacy_settings=risk_prefs(cfg))
+                                legacy_settings=risk_prefs(cfg),execution_costs=execution_costs)
     return _compute_legacy(cfg,quotes,fresh=fresh,watch_quotes=watch_quotes,previous_closes=previous_closes)
 
 
