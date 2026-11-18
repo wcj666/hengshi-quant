@@ -13,8 +13,11 @@ import fcntl
 import hashlib
 import json
 import math
+import re
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+from strategy_defaults import SIMULATED_COSTS, SIM_PARTICIPATION, initial_v1_rules
 
 CN=ZoneInfo('Asia/Shanghai')
 ROOT=Path(__file__).resolve().parent
@@ -48,36 +51,81 @@ def fees(state,kind,side,notional):
     return {'commission':commission,'stamp_tax':stamp,'transfer':transfer,'total':money(commission+stamp+transfer)}
 
 
+def _opening_number(row, field, minimum=None):
+    value = row.get(field)
+    if type(value) not in (int, float):
+        raise ValueError(f'开赛快照的 {field} 须为有效数值')
+    try:
+        return number(value, minimum)
+    except (ValueError, OverflowError) as error:
+        raise ValueError(f'开赛快照的 {field} 须为有效数值') from error
+
+
+def _opening_day(value):
+    try:
+        day = date.fromisoformat(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError('比赛日历须为 YYYY-MM-DD 格式的已核验交易日') from error
+    if day.isoformat() != value or day.weekday() >= 5:
+        raise ValueError('比赛日历须为 YYYY-MM-DD 格式的已核验工作日')
+    return day
+
+
 def initialize(snapshot,calendar,start,end,*,now=None):
-    now=now or clock_now();days=sorted(set(calendar))
-    if start not in days or end not in days or start>end:raise ValueError('比赛日期须经真实交易日历核验')
-    opening=deepcopy(snapshot);positions={}
+    now = now or clock_now()
+    if now.tzinfo is None:
+        raise ValueError('初始化时刻须带时区')
+    start_date, end_date = _opening_day(start), _opening_day(end)
+    days = sorted({_opening_day(day).isoformat() for day in calendar})
+    if start not in days or end not in days or start_date > end_date:
+        raise ValueError('比赛日期须经真实交易日历核验')
+    if not isinstance(snapshot, dict) or not isinstance(snapshot.get('positions'), list):
+        raise ValueError('开赛快照须包含完整持仓列表')
+    from quote_health import parse_provider_time
+    stamp = parse_provider_time(snapshot.get('asof'))
+    if not stamp or stamp > now or stamp >= datetime.combine(start_date, time(9, 30), CN):
+        raise ValueError('开赛快照须带时区，且早于开市、不晚于初始化时刻')
+    cash = _opening_number(snapshot, 'available_cash', 0)
+    equity = _opening_number(snapshot, 'total_assets', .01)
+    market_value = _opening_number(snapshot, 'total_market_value', 0)
+    opening = deepcopy(snapshot)
+    positions = {}
     for p in opening['positions']:
-        qty=number(p['quantity'],1);available=number(p['available_quantity'],0)
-        if qty!=int(qty) or available!=int(available) or available>qty:raise ValueError('开赛数量不一致')
-        code=p['code']
-        if code in positions:raise ValueError('持仓代码重复')
+        if not isinstance(p, dict):
+            raise ValueError('开赛持仓格式不完整')
+        qty = _opening_number(p, 'quantity', 1)
+        available = _opening_number(p, 'available_quantity', 0)
+        if qty != int(qty) or available != int(available) or available > qty:
+            raise ValueError('开赛数量不一致')
+        code = p.get('code')
+        if (not isinstance(code, str) or not re.fullmatch(r'[0-9]{6}', code) or code in positions
+                or p.get('type') not in ('stock', 'etf') or not isinstance(p.get('name'), str) or not p['name'].strip()):
+            raise ValueError('开赛持仓须有合法且不重复的代码、名称和证券类别')
+        _opening_number(p, 'cost')
+        price = _opening_number(p, 'screenshot_price', .000001)
+        if abs(money(qty * price) - _opening_number(p, 'market_value', 0)) > .011:
+            raise ValueError(f'{code} 开赛价、数量和市值不一致')
         positions[code]={**deepcopy(p),'contest_basis':p['screenshot_price'],'remaining_entry_fee':0.,
                          'opening_available':int(available),'opening_inventory':True,
                          'virtual_bought_on':None,'realized_contest_pnl':0.,'initial_risk':None}
-    total=money(opening['available_cash']+sum(p['quantity']*p['screenshot_price'] for p in positions.values()))
-    if abs(total-opening['total_assets'])>.011:raise ValueError('开赛持仓、现金和净值不一致')
+    holdings_value = sum(p['market_value'] for p in positions.values())
+    total = money(cash + sum(p['quantity'] * p['screenshot_price'] for p in positions.values()))
+    if abs(money(holdings_value) - market_value) > .011 or abs(total - equity) > .011:
+        raise ValueError('开赛持仓、现金和净值不一致')
+    universe = {code: {'code': code, 'name': name, 'type': kind} for code, name, kind in UNIVERSE}
+    for code, position in positions.items():
+        universe[code] = {key: position[key] for key in ('code', 'name', 'type')}
     state={'version':1,'mode':'paper_only','start':start,'end':end,'calendar':days,
             'created_at':now.isoformat(),'opening_snapshot':opening,'initial_equity':total,
             'cash':opening['available_cash'],'positions':positions,'plans':{},'trades':[],
             'observations':[],'closed_trades':[],'high_water':total,'maximum_drawdown':0.,
             'last_equity':total,'last_valuation_asof':opening['asof'],'paused':False,
-            'universe':[{'code':c,'name':n,'type':t} for c,n,t in UNIVERSE],
-            'policy':{'per_trade_risk':150.,'min_fees':20.,'max_position_pct':15.,
-                      'max_sector_pct':30.,'max_exposure_pct':60.,'max_positions':4,
-                      'loss_budget':1000.,'pause_drawdown':500.,'reduce_drawdown':800.,
-                      'fee_reserve':20.,'min_reward_risk':1.5,'exit_mode':'price_first'},
-            'fees':{'commission_rate':.0005,'minimum_commission':5.,
-                    'minimum_commission_confirmed':False,'stock_sell_stamp_rate':.0005,
-                    'stock_transfer_rate':.00001,'slippage_rate':.0005,'book_fraction':.1,
-                    'note':'佣金万5由用户提供；最低5元、税费模型及单侧0.05%滑点为公开标注的模拟假设，非交割单实际收费。'},
+            'universe':list(universe.values()),
+            'policy':initial_v1_rules(),
+            'fees':{**SIMULATED_COSTS, 'minimum_commission_confirmed': False, 'book_fraction': SIM_PARTICIPATION,
+                    'note':'本账本按模拟参数估算佣金、最低佣金、税费和单边滑点，实际费用以交割单为准。'},
             'real_updates':[],'events':[],'notes':[
-                '11月12日仅开账；11月13日起才允许虚拟成交。开赛历史盈亏不计入比赛收益。',
+                f'{start} 起才允许虚拟成交。比赛收益从开赛快照净值起算。',
                 '复制开赛券商快照，不连续覆盖模拟账户；之后的虚拟交易导致持仓自然分化。',
                 '开赛可卖数量照录；截图未确认可卖的份额不擅自解锁。新虚拟买入按T+1处理。',
                 '仅以巡检时实际获取的有效盘口估算成交，不补记两次巡检间错过的价格。',
@@ -168,7 +216,7 @@ def _session(state,now,side):
 def _virtual_config(state):
     positions=[{k:p[k] for k in ('code','name','type','quantity','cost')} for p in state['positions'].values()]
     for p in positions:p['baseline_price']=state['positions'][p['code']]['contest_basis']
-    return {'baseline_equity':state['initial_equity'],'max_additional_loss':1000.,'cash':state['cash'],
+    return {'baseline_equity':state['initial_equity'],'max_additional_loss':state['policy']['loss_budget'],'cash':state['cash'],
             'positions':positions,'watchlist':state['universe'],'trade_plans':state['plans'],
             'strategy_v1':{'enabled':True,'version':'1.0',**state['policy']}}
 
@@ -235,8 +283,10 @@ def execute(state,code,side,quantity,quotes,now,reason):
         if not check.get('allowed'):raise ValueError('新增未通过：'+'；'.join(check.get('blockers',[])))
         if qty>int(check.get('max_buy_shares') or 0):raise ValueError('超过V1最大股数')
         if price>plan['entry_price'] or not plan['stop_loss']<price:raise ValueError('计滑点后超Ecap或固定止损')
-        initial_risk=money((price-plan['stop_loss'])*qty+max(20.,charge['total']*3))
-        if initial_risk>state['policy']['per_trade_risk']:raise ValueError('含费用的初始风险超过150元')
+        policy = state['policy']
+        initial_risk = money((price - plan['stop_loss']) * qty + max(policy['fee_reserve'], charge['total'] * 3))
+        if initial_risk > policy['per_trade_risk']:
+            raise ValueError(f"含费用的初始风险超过 {policy['per_trade_risk']:g} 元")
         if state['cash']<price*qty+charge['total']:raise ValueError('现金不足')
     trade={'sequence':len(state['trades'])+1,'mode':'virtual_snapshot_fill','at':now.isoformat(),
            'source_timestamp':stamp.isoformat(),'code':code,'name':item['name'],'side':side,'quantity':qty,
@@ -357,7 +407,7 @@ def report(state):
     lines+=['','## 成本模型',state['fees']['note'],'','## 固定约定',*['- '+s for s in state['notes']]]
     lines+=['','## 最近虚拟成交']
     for t in state['trades'][-20:]:lines.append(f"- {t['at']} {t['side']} {t['code']} × {t['quantity']} @ {t['price']}，费用{t['fee']['total']:.2f}，额外滑点估算{t['slippage_estimate']:.2f}；{t['reason']}")
-    if not state['trades']:lines.append('尚无虚拟成交；11月13日之前禁止操作。')
+    if not state['trades']:lines.append(f"尚无虚拟成交。首个可操作日为 {state['start']}。")
     lines+=['','## 实盘比较','期末须使用用户提供的收盘净值和已确认净转账；缺失时不判胜负。']
     for r in state['real_updates']:
         pnl=money(r['equity']-state['initial_equity']-r['net_external_flow'])

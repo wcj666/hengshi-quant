@@ -3,11 +3,12 @@ from __future__ import annotations
 import math
 from trade_levels import config_plan, make_levels, num
 from pnl_engine import calculate as calculate_pnl
+from strategy_defaults import V1_DEFAULTS
 
 
 def enabled(cfg):
     value=cfg.get('strategy_v1',{})
-    return isinstance(value,dict) and bool(value.get('enabled'))
+    return isinstance(value, dict) and value.get('enabled') is True
 
 
 def _finite(value, minimum=None):
@@ -22,23 +23,25 @@ def strategy_prefs(cfg):
     """V1 ceilings cannot be relaxed through legacy percentage settings."""
     raw=cfg.get('strategy_v1',{})
     raw=raw if isinstance(raw,dict) else {}
-    def ceiling(key,default):
-        value=_finite(raw.get(key),0)
-        return min(value,default) if value is not None else default
-    fee=max(20.,_finite(raw.get('fee_reserve',raw.get('min_fees')),0) or 20.)
-    budget=_finite(raw.get('account_risk_budget',raw.get('loss_budget')),0)
-    budget=min(budget,1000.) if budget is not None else 1000.
-    return {'per_trade_risk':ceiling('per_trade_risk',150.),
-            'fee_reserve':fee,'min_fees':fee,
-            'max_position_pct':ceiling('max_position_pct',15.),
-            'max_exposure_pct':ceiling('max_exposure_pct',60.),
-            'max_sector_pct':ceiling('max_sector_pct',30.),
-            'max_positions':int(ceiling('max_positions',4)),
-            'max_daily_opens':int(ceiling('max_daily_opens',1)),
-            'account_risk_budget':budget,'loss_budget':budget,
-            'pause_drawdown':ceiling('pause_drawdown',500.),
-            'reduce_drawdown':ceiling('reduce_drawdown',800.),
-            'min_reward_risk':max(1.5,_finite(raw.get('min_reward_risk'),0) or 1.5)}
+    effective = dict(V1_DEFAULTS)
+    for key, default in V1_DEFAULTS.items():
+        value = _finite(raw.get(key), 0)
+        if value is not None:
+            effective[key] = max(value, default) if key in ('min_fees', 'min_reward_risk') else min(value, default)
+    # Legacy and canonical names sometimes coexist in imported configurations.
+    # A conflict must not enlarge the usable budget or reduce the fee reserve.
+    fee = _finite(raw.get('fee_reserve'), 0)
+    budget = _finite(raw.get('account_risk_budget'), 0)
+    if fee is not None:
+        effective['min_fees'] = max(fee, effective['min_fees'])
+    if budget is not None:
+        effective['loss_budget'] = min(budget, effective['loss_budget'])
+    effective['reduce_drawdown'] = min(effective['reduce_drawdown'], effective['loss_budget'])
+    effective['pause_drawdown'] = min(effective['pause_drawdown'], effective['reduce_drawdown'])
+    for key in ('max_positions', 'max_daily_opens'):
+        effective[key] = int(effective[key])
+    return {**effective, 'fee_reserve': effective['min_fees'],
+            'account_risk_budget': effective['loss_budget']}
 
 
 def _sector(plan,position=None):
@@ -108,7 +111,7 @@ def _account_state(context,settings):
     if account.get('paused') is not False or account.get('pause_until'):
         blockers.append('策略暂停中，须复盘确认恢复')
     if _finite(account.get('drawdown'),0) is not None and float(account['drawdown'])>=settings['pause_drawdown']:
-        blockers.append('调流后回撤已达500元，暂停新开并复盘')
+        blockers.append(f'调流后回撤已达{settings["pause_drawdown"]:g}元，暂停新开并复盘')
     verified=bool(account.get('initialized') is True and account.get('verified') is True
                   and not any(x.startswith('账户统计') or x.startswith('当日新开') for x in blockers)
                   and account.get('needs_reconcile') is False)

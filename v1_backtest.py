@@ -13,6 +13,7 @@ from pathlib import Path
 import pandas as pd
 
 from risk_engine import compute
+from strategy_defaults import BACKTEST_ENGINE_FILES, SIMULATED_COSTS, SIM_PARTICIPATION, initial_v1_rules
 from strategy_setup import CN, build_setup
 from strategy_v1 import strategy_prefs
 from v1_backtest_data import MINUTE_ENDS, audit_coverage, demo_bundle, load_bundle, validate_bundle
@@ -23,14 +24,22 @@ ROOT = Path(__file__).resolve().parent
 PROFILE = 'v1-minutes-1'
 REVIEW_FIELDS = ('fundamentals_ok', 'event_clear', 'corporate_action_clear', 'resistance_clear')
 PROFIT_TARGETS = ('take_profit_1', 'take_profit_2')
-DEFAULT_COSTS = {
-    'commission_rate': 0.0005,
-    'minimum_commission': 5.0,
-    'stock_sell_stamp_rate': 0.0005,
-    'stock_transfer_rate': 0.00001,
-    'slippage_rate': 0.0005,
-    'prior_minute_participation': 0.10,
-}
+DEFAULT_COSTS = {**SIMULATED_COSTS, 'prior_minute_participation': SIM_PARTICIPATION}
+
+
+def simulation_costs(overrides=None):
+    if overrides is not None and not isinstance(overrides, dict):
+        raise ValueError('回放费用参数须为键值对象')
+    model = {**DEFAULT_COSTS, **(overrides or {})}
+    if set(model) != set(DEFAULT_COSTS):
+        raise ValueError('存在未知费用参数')
+    for key, value in model.items():
+        upper = 1e5 if key == 'minimum_commission' else 1
+        if type(value) not in (int, float) or not 0 <= value <= upper:
+            raise ValueError(f'费用或参与率参数无效：{key}')
+    if model['slippage_rate'] >= 1:
+        raise ValueError('滑点率须低于100%')
+    return model
 
 
 def money(value):
@@ -102,15 +111,7 @@ class Replay:
             raise ValueError('初始资金须为有限正数')
         self.start_index = self.calendar.index(start)
         self.end_index = self.calendar.index(end)
-        self.cost_model = {**DEFAULT_COSTS, **(costs or {})}
-        if set(self.cost_model) != set(DEFAULT_COSTS):
-            raise ValueError('存在未知费用参数')
-        for key, value in self.cost_model.items():
-            upper = 1e5 if key == 'minimum_commission' else 1
-            if type(value) not in (int, float) or not 0 <= value <= upper:
-                raise ValueError(f'费用或参与率参数无效：{key}')
-        if self.cost_model['slippage_rate'] >= 1:
-            raise ValueError('滑点率须低于100%')
+        self.cost_model = simulation_costs(costs)
         if (not isinstance(disabled_profit_targets, (list, tuple, set, frozenset))
                 or any(target not in PROFIT_TARGETS for target in disabled_profit_targets)):
             raise ValueError('退出对照只能关闭第一或第二止盈')
@@ -134,7 +135,7 @@ class Replay:
         self.budget_locked = False
         self.observed_intraday_drawdown = 0.0
         self.technical_signal_count = 0
-        self.rules = {'enabled': True, 'exit_mode': 'price_first'}
+        self.rules = initial_v1_rules()
         self.settings = strategy_prefs({'strategy_v1': self.rules})
 
     @staticmethod
@@ -554,9 +555,6 @@ def run_backtest(bundle, start, end, initial_cash=100000.0, *, bundle_sha256=Non
     summary['observed_intraday_max_drawdown'] = simulation.observed_intraday_drawdown
     summary['coverage_reasons'] = dict(Counter(d['reason'] for d in simulation.decisions
                                                if (d['date'], d['code']) in simulation.missing_execution_data))
-    engine_files = ('v1_backtest.py', 'v1_backtest_data.py', 'v1_backtest_report.py',
-                    'strategy_setup.py', 'strategy_v1.py', 'risk_engine.py', 'trade_levels.py',
-                    'quote_health.py', 'pnl_engine.py')
     return {
         'meta': {
             'engine': PROFILE, 'start': start, 'end': end, 'demo': bundle.get('demo') is True,
@@ -567,7 +565,7 @@ def run_backtest(bundle, start, end, initial_cash=100000.0, *, bundle_sha256=Non
             'input_coverage': audit_coverage(bundle, start, end),
             'bundle_sha256': bundle_sha256 or hashlib.sha256(json.dumps(
                 bundle, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest(),
-            'engine_sha256': hashlib.sha256(b''.join((ROOT / f).read_bytes() for f in engine_files)).hexdigest(),
+            'engine_sha256': hashlib.sha256(b''.join((ROOT / f).read_bytes() for f in BACKTEST_ENGINE_FILES)).hexdigest(),
             'price_basis': bundle['price_basis'], 'initial_cash': simulation.initial_cash,
             'rules': simulation.settings, 'costs': simulation.cost_model, 'universe_size': len(bundle['securities']),
             'disabled_profit_targets': sorted(simulation.disabled_profit_targets),

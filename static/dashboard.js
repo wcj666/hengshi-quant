@@ -96,11 +96,11 @@ function table(headers, rows){if(!rows.length)return '<div class="empty">暂无�
 function tr(cells){return '<tr>'+cells.map(c=>`<td>${c}</td>`).join('')+'</tr>';}
 function pill(t,cls='muted'){return `<span class="pill ${cls}">${escapeHtml(t)}</span>`;}
 
-const STRATEGY_DEFAULTS={max_exposure_pct:60,max_position_pct:15,max_sector_pct:30,max_positions:4,fee_reserve:20,per_trade_risk:150,account_risk_budget:1000};
+const STRATEGY_FIELDS=['max_exposure_pct','max_position_pct','max_sector_pct','max_positions','fee_reserve','per_trade_risk','account_risk_budget'];
 const noteText=x=>typeof x==='string'?x:(x?.reason||x?.message||x?.label||JSON.stringify(x));
 function renderStrategy(data=STRATEGY,risk=STORE?.risk){
  if(!$('strategy-panel'))return;
- const d=data||{},v=risk?.strategy||d.risk||{},prefs={...STRATEGY_DEFAULTS,...(d.settings||{})};
+ const d=data||{},v=risk?.strategy||d.risk||{},prefs=d.settings||risk?.settings||{};
  const enabled=d.enabled??v.enabled??false,account=v.account||d.account||{};
  let blockers=[...new Set([...(d.blockers||[]),...(v.blockers||[])].map(noteText))];
  const legacyMissing=d.legacy_positions||[];
@@ -112,13 +112,13 @@ function renderStrategy(data=STRATEGY,risk=STORE?.risk){
   }
  }
  if(blockers.some(x=>x.includes('现有持仓超过')))blockers=blockers.filter(x=>!x.includes('已达同时持仓数量上限'));
- const labels=[['总权益仓位',pct(prefs.max_exposure_pct)],['单一证券',pct(prefs.max_position_pct)],['同一行业',pct(prefs.max_sector_pct)],['持仓数量',prefs.max_positions+'只'],['单笔总风险',money(prefs.per_trade_risk)],['费用滑点至少',money(prefs.fee_reserve)],['账户预算',money(prefs.account_risk_budget)]];
+ const labels=[['总权益仓位',pct(prefs.max_exposure_pct)],['单一证券',pct(prefs.max_position_pct)],['同一行业',pct(prefs.max_sector_pct)],['持仓数量',prefs.max_positions==null?'—':prefs.max_positions+'只'],['单笔总风险',money(prefs.per_trade_risk)],['费用滑点至少',money(prefs.fee_reserve)],['账户预算',money(prefs.account_risk_budget)],['回撤暂停新增',money(prefs.pause_drawdown)],['回撤减风险复核',money(prefs.reduce_drawdown)]];
  $('strategy-rules').innerHTML=labels.map(([name,value])=>`<div><span>${name}</span><strong>${value}</strong></div>`).join('');
  $('strategy-status').textContent=!enabled?'V1未启用':blockers.length?'暂停新增 · 旧仓过渡':'V1已启用 · 待逐笔核验';
  $('strategy-status').className='pill '+(blockers.length?'danger':'muted');
  const initialized=account.initialized===true,verified=account.verified===true;
  $('strategy-resume-controls').hidden=account.budget_exhausted!==true;
- $('strategy-account').textContent=!initialized?'V1账户待初始化：先核对持仓、现金与起点前后资金流水；以有效完整行情建立独立记录。原11月6日历史基准保留。':`V1账户 ${verified&&!account.needs_reconcile?'已核对':'待核对'} · 调流后净值 ${money(account.adjusted_equity)} · 历史高点 ${money(account.high_water??account.high_water_mark)} · 回撤 ${money(account.drawdown)} · 起点后外部净流入 ${money(account.net_external_flow)}${account.pause_until?' · 暂停至 '+account.pause_until:''}。对账、入金及版本升级均不重置高点。`;
+ $('strategy-account').textContent=account.example_unconfirmed?'当前为示例台账。填写实际持仓和现金后，在「外部资金流水与对账」确认 V1 起点。':!initialized?'V1账户待初始化：核对持仓、现金与资金流水，再用完整行情建立起点。':`V1账户 ${verified&&!account.needs_reconcile?'已核对':'待核对'} · 调流后净值 ${money(account.adjusted_equity)} · 历史高点 ${money(account.high_water??account.high_water_mark)} · 回撤 ${money(account.drawdown)} · 起点后外部净流入 ${money(account.net_external_flow)}${account.pause_until?' · 暂停至 '+account.pause_until:''}。对账、入金及版本升级均不重置高点。`;
  const b=$('strategy-blockers');b.className='signal-note'+(blockers.length?' blocked':'');b.innerHTML=blockers.length?'<strong>当前新增阻断原因</strong><ul>'+blockers.map(x=>`<li>${escapeHtml(x)}</li>`).join('')+'</ul>':'账户规则暂无阻断；仍须通过完整日线形态、有效次日计划、时段及券商报价核验。';
  const fees=(risk?.positions||[]).reduce((sum,p)=>sum+Number(p.future_fee_reserve||0),0);
  $('strategy-exposure').innerHTML=[['当前权益仓位',pct(v.exposure_pct)],['当前持仓',v.position_count==null?'—':v.position_count+'只'],['已有仓未来费用预留',fees?money(fees):'待固定计划'],['可新增风险',money(risk?.available_new_risk)]].map(([k,x])=>`<div><span>${k}</span><strong>${x}</strong></div>`).join('');
@@ -128,12 +128,19 @@ function renderStrategy(data=STRATEGY,risk=STORE?.risk){
  const sectors=Object.entries(v.sector_exposure||{});$('strategy-sectors').innerHTML=sectors.length?table(['行业','市值','占净值','上限'],sectors.map(([name,x])=>tr([escapeHtml(name),money(x.value??x.market_value),pct(x.pct),pct(prefs.max_sector_pct)]))):'<p class="tip">行业数据待补；不能按零敞口放行新增。</p>';
  $('strategy-flows').innerHTML=(d.flows||[]).length?table(['日期','外部净流入','备注'],d.flows.map(x=>tr([escapeHtml(x.date),signedMoneyText(x.amount),escapeHtml(x.note||'—')]))):'<p class="tip">尚无起点后外部资金流水。</p>';
  $('strategy-reviews').innerHTML=(d.reviews||[]).length?table(['代码','开仓 / 平仓','净盈亏','净R','规则','改进'],d.reviews.map(x=>tr([escapeHtml(x.code),escapeHtml((x.opened_on||'—')+' / '+(x.closed_on||'—')),signedMoneyText(x.net_pnl),Number(x.planned_risk)>0?format(Number(x.net_pnl)/Number(x.planned_risk),2):'—',x.violation?'存在违规':'遵守',escapeHtml(x.note||'—')]))):'<p class="tip">尚无完整平仓复盘。不会从持仓截图推测成交。</p>';
- const f=$('strategy-settings-form');for(const key of Object.keys(STRATEGY_DEFAULTS))if(document.activeElement!==f.elements[key])f.elements[key].value=prefs[key];
+ const f=$('strategy-settings-form');for(const key of STRATEGY_FIELDS)if(document.activeElement!==f.elements[key])f.elements[key].value=prefs[key]??'';
 }
 async function refreshStrategy(){try{STRATEGY=await api('/api/strategy');renderStrategy(STRATEGY);}catch(e){$('strategy-status').textContent='V1规则读取失败';$('strategy-blockers').textContent='读取失败：'+e.message;showToast('V1规则读取失败：'+e.message,true);}}
-async function saveStrategySettings(e){e.preventDefault();const data={};for(const key of Object.keys(STRATEGY_DEFAULTS))data[key]=Number(e.target.elements[key].value);try{const d=await api('/api/strategy/settings','PUT',data);showToast(d.message||'V1风险上限已保存');await refresh();}catch(err){showToast('V1规则保存失败：'+err.message,true);}}
+async function saveStrategySettings(e){e.preventDefault();const data={};for(const key of STRATEGY_FIELDS)data[key]=Number(e.target.elements[key].value);try{const d=await api('/api/strategy/settings','PUT',data);showToast(d.message||'V1风险上限已保存');await refresh();}catch(err){showToast('V1规则保存失败：'+err.message,true);}}
 async function saveStrategyFlow(e){e.preventDefault();const f=e.target;try{const d=await api('/api/strategy/cashflows','POST',{date:f.elements.date.value,amount:Number(f.elements.amount.value),note:f.elements.note.value});showToast(d.message||'资金流水已登记，请核对当前台账');f.elements.amount.value='';f.elements.note.value='';await refresh();}catch(err){showToast('资金流水保存失败：'+err.message,true);}}
-async function reconcileStrategy(){try{const d=await api('/api/strategy/reconcile','POST',{});showToast(d.message||'已完成台账核对；历史高点保留');await refresh();}catch(e){showToast('台账核对未通过：'+e.message,true);}}
+async function reconcileStrategy(){
+ const body={};
+ if(STRATEGY?.account?.example_unconfirmed){
+   if(!confirm('请确认台账已填写你的真实持仓与现金。确认后将用已核验行情建立 V1 起点。'))return;
+   body.confirmed_actual_account=true;
+ }
+ try{const d=await api('/api/strategy/reconcile','POST',body);showToast(d.message||'已完成台账核对；历史高点保留');await refresh();}catch(e){showToast('台账核对未通过：'+e.message,true);}
+}
 async function resumeStrategy(){const button=$('strategy-resume');button.disabled=true;try{const d=await api('/api/strategy/resume','POST',{acknowledged:true});showToast(d.message||'已解除预算耗尽锁定；回撤高点保留，仍须重新核验新增条件');await refresh();}catch(e){showToast('恢复未通过：'+e.message,true);}finally{button.disabled=false;}}
 async function saveStrategyReview(e){e.preventDefault();const f=e.target,data={};for(const k of ['code','opened_on','closed_on','note'])data[k]=f.elements[k].value;for(const k of ['net_pnl','planned_risk'])data[k]=Number(f.elements[k].value);data.violation=f.elements.violation.value==='true';try{const d=await api('/api/strategy/reviews','POST',data);showToast(d.message||'复盘已保存');f.reset();await refresh();}catch(err){showToast('复盘保存失败：'+err.message,true);}}
 
@@ -141,6 +148,7 @@ function render(s){
  if(s.exit_suggestions)EXIT_SUGGESTIONS=s.exit_suggestions;
  const r=s.risk,c=s.config,meta=s.meta||{};
  $('baseline').textContent=money(c.baseline_equity);
+ $('baseline-date').textContent=c.baseline_date||'—';
  $('equity').textContent=money(r.equity);
  showPnl(r.pnl,s.fresh?'盘后/快照估算':'非有效行情');
  $('cash').textContent=money(c.cash);

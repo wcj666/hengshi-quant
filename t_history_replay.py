@@ -8,8 +8,9 @@ import pandas as pd
 
 from price_review import review_price
 from quote_health import parse_provider_time
+from strategy_defaults import T_DEFAULTS, initial_v1_rules
 from t_engine import _buyback_blockers, _restore_blockers, _risk_conflict, build_t_observations
-from v1_backtest import DEFAULT_COSTS, costs_for, execution_time, money, round_lot, try_price
+from v1_backtest import costs_for, execution_time, money, round_lot, simulation_costs, try_price
 from v1_backtest_data import MINUTE_ENDS
 
 
@@ -158,6 +159,8 @@ class TReplay:
         self.seeds = seeds
         self.initial = self.high_water = initial
         self.costs = costs
+        self.rules = initial_v1_rules()
+        self.t_settings = T_DEFAULTS.copy()
         self.structures = structures
         self.original = {code: row['quantity'] for code, row in seeds.items()}
         self.holdings = self.original.copy()
@@ -181,15 +184,17 @@ class TReplay:
                      for code, qty in self.holdings.items()]
         plans = {code: row['plan'] for code, row in self.seeds.items()}
         cfg = dict(cash=self.cash, positions=positions, trade_plans=plans,
-                   strategy_v1={'enabled': True}, t_settings={'enabled': True})
+                   strategy_v1=self.rules, t_settings=self.t_settings)
         breached = [code for code, qty in self.holdings.items()
                     if qty and prices[code] <= plans[code]['stop_loss']]
-        stress = money(sum(max(0, prices[code] - plans[code]['stop_loss']) * qty + 20
+        stress = money(sum(max(0, prices[code] - plans[code]['stop_loss']) * qty + self.rules['fee_reserve']
                            for code, qty in self.holdings.items() if qty))
-        account = dict(initialized=True, verified=True, needs_reconcile=False, paused=drawdown >= 500,
-                       drawdown=drawdown, budget_exhausted=drawdown + stress >= 1000)
+        budget = self.rules['account_risk_budget']
+        account = dict(initialized=True, verified=True, needs_reconcile=False,
+                       paused=drawdown >= self.rules['pause_drawdown'],
+                       drawdown=drawdown, budget_exhausted=drawdown + stress >= budget)
         risk = dict(valid=True, equity=equity, stop_breaches=breached, existing_planned_stress=stress,
-                    available_new_risk=max(0, money(1000 - drawdown - stress)) if not breached else 0,
+                    available_new_risk=max(0, money(budget - drawdown - stress)) if not breached else 0,
                     strategy={'account': account, 'exposure_pct': (equity - self.cash) / equity * 100})
         return cfg, risk
 
@@ -309,7 +314,7 @@ class TReplay:
                                           cum_volume=totals[code][0] / 100, cum_amount=totals[code][1]))
             pending = []
             last_at = at
-            if index < 29 or label >= '14:45' or not current:
+            if index < 29 or label >= self.t_settings['last_open_time'] or not current:
                 continue
             quote = {code: self._quote(code, bar['close'], sessions[code], at) for code, bar in current.items()}
             data = {code: {'valid': True, 'source_timestamp': at.isoformat(), 'rows': bars}
@@ -364,7 +369,7 @@ def evaluate_t_window(bundle, start, end, initial_cash, costs=None):
     errors, examples, structures = _coverage(bundle, seeds, window)
     if errors:
         return _blocked('做 T 回放证据不完整，暂不计算区间可成交比例与收益。', errors, examples)
-    model = dict(DEFAULT_COSTS, **(costs or {}))
+    model = simulation_costs(costs)
     simulation = TReplay(bundle, seeds, money(initial_cash), previous, model, structures)
     completed = 0
     for day in window:

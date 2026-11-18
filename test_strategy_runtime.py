@@ -18,6 +18,33 @@ class RuntimeTests(unittest.TestCase):
     def test_unverified_never_initializes(self):
         a=runtime.observe(self.out,self.cfg,60000,verified=False)
         self.assertFalse(a['initialized']);self.assertFalse(a['verified'])
+    def test_example_needs_explicit_account_reconciliation(self):
+        cfg = {**self.cfg, 'account_profile': 'example', 'positions': []}
+        account = runtime.observe(self.out, cfg, cfg['cash'], verified=True)
+        self.assertTrue(account['example_unconfirmed'])
+        self.assertFalse((self.out/'strategy_account.json').exists())
+        account = runtime.observe(self.out, cfg, 59_000, verified=True, reconcile=True)
+        self.assertEqual(account['high_water'], 59_000)
+        self.assertFalse(account['example_unconfirmed'])
+    def test_unreadable_initialized_account_never_creates_new_start(self):
+        self.out.mkdir()
+        path = self.out/'strategy_account.json'
+        path.write_text('{invalid')
+        with self.assertRaisesRegex(ValueError, '禁止重置高水位'):
+            runtime.observe(self.out, self.cfg, 60_000, verified=True)
+        self.assertEqual(path.read_text(), '{invalid')
+    def test_initialization_and_effective_risk_tiers_share_settings(self):
+        from risk_extensions import tier_alerts, risk_level
+        from strategy_v1 import strategy_prefs
+        cfg = {'strategy_v1': {'enabled':True, 'loss_budget':900, 'account_risk_budget':950,
+                               'min_fees':25, 'fee_reserve':30, 'pause_drawdown':300, 'reduce_drawdown':600}}
+        limits = runtime.settings(cfg)
+        self.assertEqual(limits, strategy_prefs(cfg))
+        self.assertEqual((limits['loss_budget'],limits['min_fees']), (900,30))
+        risk = {'valid':True,'budget':900,'used':610,'settings':limits,'strategy':{'enabled':True},
+                'existing_planned_stress':0,'remaining':290}
+        self.assertEqual(tier_alerts(risk)[0]['level'], 600)
+        self.assertEqual(risk_level(risk)['drawdown_level'], 'high')
     def test_cash_flow_preserves_high_and_loss(self):
         a=runtime.observe(self.out,self.cfg,60000,verified=True)
         self.assertEqual(a['high_water'],60000)

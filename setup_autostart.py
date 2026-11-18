@@ -5,6 +5,7 @@ It does NOT connect to a brokerage account or submit trades.
 """
 from __future__ import annotations
 import argparse
+import json
 import os
 import signal
 import plistlib
@@ -128,7 +129,6 @@ def import_previous_config():
     if candidates:
         best = max(candidates, key=lambda p: p.stat().st_mtime)
         try:
-            import json
             data = json.loads(best.read_text(encoding='utf-8'))
             if isinstance(data, dict) and isinstance(data.get('positions'), list) and 'baseline_equity' in data:
                 shutil.copy2(best, cfg)
@@ -139,8 +139,19 @@ def import_previous_config():
     if supplied.is_file():
         shutil.copy2(supplied, cfg)
         return '已采用来源目录的配置，请核对持仓与现金'
-    shutil.copy2(SOURCE / 'config.example.json', cfg)
-    return '已安装示例配置，请填写实际持仓与现金'
+    from strategy_defaults import T_DEFAULTS, initial_v1_rules
+
+    example = json.loads((SOURCE / 'config.example.json').read_text(encoding='utf-8'))
+    example['account_profile'] = 'example'
+    example['strategy_v1'] = initial_v1_rules()
+    example['t_settings'] = dict(T_DEFAULTS)
+    serialized = json.dumps(example, ensure_ascii=False, indent=2, allow_nan=False) + '\n'
+    try:
+        with cfg.open('x', encoding='utf-8') as handle:
+            handle.write(serialized)
+    except FileExistsError:
+        return '保留已安装版本的持仓和自选配置'
+    return '已安装虚构账户示例，请填写实际持仓和现金，再用完整行情核对账户'
 
 
 def backup_current_config():

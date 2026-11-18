@@ -156,6 +156,8 @@ def scan(cfg, mode):
 def portfolio(cfg,quotes,mode):
     rows=[];missing=[]
     for p in cfg['positions']:
+        if p['quantity'] <= 0:
+            continue
         code=code_str(p['code'])
         item=quotes.get((p['type'],code))
         if mode=='demo':
@@ -179,8 +181,10 @@ def portfolio(cfg,quotes,mode):
                      '数量':p['quantity'],'基准价':p['baseline_price'],
                      '当前快照价':px,'当前市值':value,
                      '昨收参考':prev,'浮动盈亏估算':floating,'当日参考盈亏估算':daily,
-                     '相对11/6变动':delta,'状态':status})
-    df=pd.DataFrame(rows)
+                     '相对历史基准变动':delta,'状态':status})
+    columns = ['证券','代码','类型','数量','基准价','当前快照价','当前市值',
+               '昨收参考','浮动盈亏估算','当日参考盈亏估算','相对历史基准变动','状态']
+    df=pd.DataFrame(rows, columns=columns)
     if missing:
         equity=None; loss=None;remain=None
     else:
@@ -197,11 +201,12 @@ def scenarios(cfg):
         for p in cfg['positions']:
             total+=p['baseline_price']*p['quantity']*scenario[p['type']]
         data.append({'情景':scenario['name'],'额外变动(元)':round(total,2),
-                     '超过1000元预算':'是' if -total>cfg['max_additional_loss'] else '否'})
+                     '超过历史预算':'是' if -total>cfg['max_additional_loss'] else '否'})
     return pd.DataFrame(data)
 
 
 def save_report(cfg,scan_df,port_df,stress,errors,missing,equity,loss,remain,mode):
+    from strategy_v1 import enabled
     OUT.mkdir(exist_ok=True)
     scan_df.to_csv(OUT/'scan.csv',index=False,encoding='utf-8-sig')
     port_df.to_csv(OUT/'portfolio.csv',index=False,encoding='utf-8-sig')
@@ -215,13 +220,15 @@ def save_report(cfg,scan_df,port_df,stress,errors,missing,equity,loss,remain,mod
         summary='部分持仓行情缺失，禁止计算“当前账户剩余风险预算”：'+ '、'.join(missing)
     elif mode=='demo':
         summary=f'演示账户净值 ¥{equity:,.2f}；演示额外损失 ¥{loss:,.2f}；仅用于测试，不得作为交易依据。'
+    elif enabled(cfg):
+        summary=f'快照估算净值 ¥{equity:,.2f}，相对历史基准变动 ¥{-loss:,.2f}。V1 回撤预算以盘中核验为准。'
     else:
         summary=f'快照估算净值 ¥{equity:,.2f}；相对基准变动 ¥{-loss:,.2f}；预算余量 ¥{remain:,.2f}（不保证未来损失封顶）。'
     note='；'.join(errors) if errors else '无抓取报错（不代表行情无延迟）。'
     # 编写一个无需服务器的离线 HTML 报告。
     content=f'''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>A股A+B量化观察报告</title><style>body{{font-family:system-ui,-apple-system,sans-serif;max-width:1120px;margin:35px auto;padding:0 18px;color:#243047;background:#f7f9fc}}h1{{font-size:27px}}h2{{margin-top:36px}}.panel{{background:white;padding:20px;border-radius:14px;box-shadow:0 2px 12px #ddd7}}.data{{border-collapse:collapse;width:100%;background:white;font-size:13px}}th,td{{padding:10px;border-bottom:1px solid #e9edf4;text-align:left}}th{{background:#e9eef9;position:sticky;top:0}}.scroll{{overflow-x:auto}}.warning{{color:#a3480b}}small{{color:#697386}}code{{background:#eef2f7;padding:3px 5px;border-radius:4px}}</style>
-<h1>A股量化选股 + 持仓风险报告</h1><div class="panel"><strong>{html.escape(status)}</strong><p>生成时间：{html.escape(timestamp)}<br>基准：{html.escape(baseline)}<br>最大额外亏损预算：¥{cfg['max_additional_loss']:,.2f}</p><p class="warning">{html.escape(summary)}</p><small>禁止直接依据本报告自动下单。成交滑点/跳空不能被本系统控制。</small></div>
+<h1>A股量化选股 + 持仓风险报告</h1><div class="panel"><strong>{html.escape(status)}</strong><p>生成时间：{html.escape(timestamp)}<br>历史基准：{html.escape(baseline)}<br>历史预算：¥{cfg['max_additional_loss']:,.2f}</p><p class="warning">{html.escape(summary)}</p><small>禁止直接依据本报告自动下单。成交滑点/跳空不能被本系统控制。</small></div>
 <h2>A：观察池量价候选（非买入推荐）</h2><div class="scroll">{table(scan_df)}</div>
 <p><small>评分：收盘高于MA5（25分）+MA5高于MA20（25分）+突破前20日高点（30分）+成交量≥前5日均量1.3倍（20分）。仅做排序，不构成统计回测收益。</small></p>
 <h2>B：持仓市值与预算</h2><div class="scroll">{table(port_df)}</div><h2>组合压力测试（基准持仓）</h2><div class="scroll">{table(stress)}</div>

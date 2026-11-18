@@ -58,7 +58,7 @@ refresh=async()=>{calls.push('refresh');return true;};
 
     def test_budget_resume_is_explicit_and_only_shown_for_latched_accounts(self):
         self.run_js(r'''
-const fields={};for(const key of Object.keys(STRATEGY_DEFAULTS))fields[key]={value:''};
+const fields={};for(const key of STRATEGY_FIELDS)fields[key]={value:''};
 $('strategy-settings-form').elements=fields;
 renderStrategy({enabled:true,account:{budget_exhausted:false}},{});
 if(!$('strategy-resume-controls').hidden)throw Error('resume shown without budget latch');

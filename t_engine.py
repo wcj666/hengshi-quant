@@ -9,9 +9,12 @@ from zoneinfo import ZoneInfo
 import hashlib
 import math
 from quote_health import parse_provider_time
+from strategy_defaults import T_DEFAULTS
+from strategy_v1 import strategy_prefs
 from t_costs import money, roundtrip, sold_fee_for_quantity, decimal, estimate_leg, nonnegative, TICKS, ROUND_CEILING, ROUND_FLOOR
 
 CN=ZoneInfo('Asia/Shanghai')
+T_CUTOFF = time.fromisoformat(T_DEFAULTS['last_open_time'])
 RISK_EXITS={'stop','take_profit_1','take_profit_2','structure_support','structure_weakness','time_5','time_10'}
 
 
@@ -44,11 +47,20 @@ def _fresh(value,clock,max_age):
 
 
 def _settings(cfg):
-    raw=cfg.get('t_settings') or {}
-    return {'fee_reserve':max(20.,_positive(raw.get('fee_reserve')) or 20.),
-            'max_fraction':min(1/3,max(0,_number(raw.get('max_fraction'),0) if _number(raw.get('max_fraction'),0) is not None else 1/3)),
-            'stock_deviation_pct':max(.3,_positive(raw.get('stock_deviation_pct')) or .8),
-            'etf_deviation_pct':max(.15,_positive(raw.get('etf_deviation_pct')) or .4)}
+    """Numerical rules shared by live signals, the ledger and historical replay."""
+    raw = cfg.get('t_settings')
+    if not isinstance(raw, dict):
+        raw = {}
+    reserve = _positive(raw.get('fee_reserve')) or T_DEFAULTS['fee_reserve']
+    maximum = _number(raw.get('max_fraction'), 0)
+    if maximum is None:
+        maximum = T_DEFAULTS['max_fraction']
+    return {
+        'fee_reserve': max(T_DEFAULTS['fee_reserve'], reserve),
+        'max_fraction': min(T_DEFAULTS['max_fraction'], maximum),
+        'stock_deviation_pct': max(.3, _positive(raw.get('stock_deviation_pct')) or T_DEFAULTS['stock_deviation_pct']),
+        'etf_deviation_pct': max(.15, _positive(raw.get('etf_deviation_pct')) or T_DEFAULTS['etf_deviation_pct']),
+    }
 
 
 def _minutes(data,clock):
@@ -143,7 +155,7 @@ def closeout_summary(cycle, model=None, samples=None):
     known = decimal(sell_fee or 0) + sum(decimal(fee) for _, _, fee in parsed if fee is not None)
     complete = matched and sell_fee is not None and all(fee is not None for _, _, fee in parsed)
     estimated, bases, unknown_fee = known, [], False
-    reserve = max(20., _positive(cycle.get('fee_reserve')) or 20.)
+    reserve = max(T_DEFAULTS['fee_reserve'], _positive(cycle.get('fee_reserve')) or 0.)
     kind = cycle.get('kind', 'stock')
     if sell_fee is None:
         fee, basis = estimate_leg(kind, 'sell', float(sell_gross), model or {}, samples or [])
@@ -208,7 +220,7 @@ def closeout_signals(cfg, book, *, now, calendar_ok, market_session):
     """Rebuild quote-independent closeout notices from the current actual ledger."""
     clock = _clock(now)
     if not (calendar_ok and market_session and clock.weekday() < 5
-            and time(14, 45) <= clock.time() < time(15)):
+            and T_CUTOFF <= clock.time() < time(15)):
         return []
     return [_signal(row, clock, row['cycle_id'])
             for row in _closeout_rows(cfg, book.get('cycles') or [], book, clock)]
@@ -216,16 +228,16 @@ def closeout_signals(cfg, book, *, now, calendar_ok, market_session):
 
 def _restore_blockers(cfg, risk, base, price, code):
     blockers=[];strategy=risk.get('strategy') or {};equity=_positive(risk.get('equity'))
-    account=strategy.get('account') or {};limits=cfg.get('strategy_v1') or {}
+    account=strategy.get('account') or {};limits=strategy_prefs(cfg)
     if account.get('verified') is not True or account.get('needs_reconcile') is not False or account.get('paused'):
         blockers.append('账户未核对或暂停，当前不允许承诺接回')
     drawdown=_number(account.get('drawdown'),0)
-    if drawdown is None or drawdown>=min(500.,_positive(limits.get('pause_drawdown')) or 500.):
+    if drawdown is None or drawdown >= limits['pause_drawdown']:
         blockers.append('账户回撤未核验或已达暂停线')
     exposure=_number(strategy.get('exposure_pct'),0)
-    if exposure is None or exposure>min(60.,_positive(limits.get('max_exposure_pct')) or 60.):
+    if exposure is None or exposure > limits['max_exposure_pct']:
         blockers.append('当前总仓位超限，接回将恢复高仓位')
-    if equity is None or base*price>equity*min(15.,_positive(limits.get('max_position_pct')) or 15.)/100:
+    if equity is None or base * price > equity * limits['max_position_pct'] / 100:
         blockers.append('原底仓单一证券仓位超限，接回受限')
     if not _positive((cfg.get('trade_plans') or {}).get(code,{}).get('stop_loss')) or risk.get('existing_planned_stress') is None:
         blockers.append('固定止损或组合风险未知，接回条件未通过')
@@ -262,8 +274,8 @@ def _explain(row,position,cfg,risk,quote,minutes,ledger,clock,session):
                availability_asof=entry.get('confirmed_at') if confirmed else None,
                availability_source=entry.get('source','manual') if confirmed else None,
                t_capacity=capacity,quote_asof=quote.get('source_timestamp'))
-    check('交易时段',session and (bool(row.get('cycle_id')) or clock.time()<time(14,45)),
-          '14:45后不开新T；休市保留记录，下一交易日重新核验')
+    check('交易时段',session and (bool(row.get('cycle_id')) or clock.time() < T_CUTOFF),
+          f'{T_DEFAULTS["last_open_time"]}后不开新T；休市保留记录，下一交易日重新核验')
     check('当日可卖底仓',confirmed and capacity>=100 if confirmed else False,
           f'已记录可卖{available}份；保留至少2/3底仓，本轮测算上限{capacity}份' if confirmed else '需要今天的券商可卖数量；不由T+1自动推算')
     fresh=bool(row['price'] and _fresh(quote.get('source_timestamp'),clock,90) and risk.get('valid') is True)
@@ -321,13 +333,15 @@ def _buyback_blockers(cfg,position,quote,risk,cycle,ledger,quantity,price,fee):
     if risk.get('valid') is not True:blockers.append('完整账户行情未核验')
     strategy=risk.get('strategy') or {};account=strategy.get('account') or risk.get('strategy_account') or {}
     if account.get('initialized') is not True or account.get('verified') is not True or account.get('needs_reconcile') is not False:blockers.append('账户、成交与资金流水待核对')
+    limits = strategy_prefs(cfg)
     drawdown=_number(account.get('drawdown'),0)
-    if drawdown is None or drawdown>=500:blockers.append('账户回撤未核验或达到500元暂停线')
+    if drawdown is None or drawdown >= limits['pause_drawdown']:
+        blockers.append(f'账户回撤未核验或达到{limits["pause_drawdown"]:g}元暂停线')
     if account.get('paused') or account.get('budget_exhausted') or account.get('pause_until'):blockers.append('账户仍处于暂停状态')
     equity=_positive(risk.get('equity'));cash=_number(cfg.get('cash'),0)
     if cash is None or cash<quantity*price+fee:blockers.append('现金不足以覆盖回补及费用预留')
-    settings=cfg.get('strategy_v1') or {};pos_cap=min(15.,_positive(settings.get('max_position_pct')) or 15.)
-    total_cap=min(60.,_positive(settings.get('max_exposure_pct')) or 60.)
+    pos_cap = limits['max_position_pct']
+    total_cap = limits['max_exposure_pct']
     exposure_pct=_number(strategy.get('exposure_pct'),0)
     if equity is None:blockers.append('账户净值未核验')
     else:
@@ -340,7 +354,7 @@ def _buyback_blockers(cfg,position,quote,risk,cycle,ledger,quantity,price,fee):
     elif price<=stop:blockers.append('回补价不高于固定止损，不能接回')
     else:
         planned=(price-stop)*quantity+fee
-        single=min(150.,_positive(settings.get('per_trade_risk')) or 150.)
+        single = limits['per_trade_risk']
         if planned>single+1e-8:blockers.append('含费用的回补计划风险超过单笔上限')
         if planned>available+1e-8:blockers.append('回补计划风险超过账户可用额度')
     return list(dict.fromkeys(blockers))
@@ -353,7 +367,7 @@ def build_t_observations(cfg,quotes,risk,minute_by_code,ledger,now=None,market_s
     record. General reduction fills never become implicit T-sale records.
     """
     clock=_clock(now);day=str(clock.date());prefs=_settings(cfg);ledger=ledger or {};risk=risk or {};quotes=quotes or {}
-    result={'rows':[],'signals':[],'asof':clock.isoformat(),'mode':'sell_first',
+    result={'rows':[],'signals':[],'asof':clock.isoformat(),'mode':T_DEFAULTS['mode'],
             'note':'先卖后买为主；先买后卖受现有V1不加仓及T+1限制，当前不提供可执行提示。阈值尚未回测。'}
     cycles=ledger.get('cycles') or [];availability=ledger.get('availability') or {}
     fee_model=ledger.get('fee_model') or {};fee_samples=ledger.get('fee_samples') or []
@@ -361,7 +375,7 @@ def build_t_observations(cfg,quotes,risk,minute_by_code,ledger,now=None,market_s
                  (time(9,30)<=clock.time()<time(11,30) or time(13)<=clock.time()<time(15)))
     # Closing an actual record is a ledger decision, not a new market trade.
     # Keep it visible even in exit-only mode or when minute/quote data is absent.
-    closeouts = _closeout_rows(cfg, cycles, ledger, clock) if session and clock.time() >= time(14, 45) else []
+    closeouts = _closeout_rows(cfg, cycles, ledger, clock) if session and clock.time() >= T_CUTOFF else []
     result['rows'].extend(closeouts)
     result['signals'].extend(_signal(row, clock, row['cycle_id']) for row in closeouts)
     closeout_codes = {row['code'] for row in closeouts}
@@ -411,7 +425,7 @@ def build_t_observations(cfg,quotes,risk,minute_by_code,ledger,now=None,market_s
                                          sell_fee=sold_fee_for_quantity(cycle, quantity))
                 row.update(costs)
                 fee = costs['fee_reserve']
-            if clock.time()>=time(14,45):
+            if clock.time() >= T_CUTOFF:
                 row.update(phase='blocked',status='T收尾资料待核',reason='实际T成交记录未通过收尾核对，先核对分笔成交，不为完成做T追买。');continue
             if quantity<100:row.update(phase='blocked',status='剩余不足一手',reason='实际未接回数量不足100股/份，不凑整扩大回补');continue
             target = _tick(decimal(sell_price) - decimal(costs['minimum_spread']), kind, ROUND_FLOOR)
@@ -427,7 +441,10 @@ def build_t_observations(cfg,quotes,risk,minute_by_code,ledger,now=None,market_s
             row.update(phase='buyback_ready',status='做T回补条件观察',reason='实际T卖出记录、剩余数量、扣费价差、回踩企稳和账户风控均通过；仍须在券商确认价格与成交。',quantity=quantity,tradable=True)
             result['signals'].append(_signal(row,clock,str(cycle.get('id',''))));continue
         if todays:row.update(phase='closed',status='当天本轮已结束',reason='同一证券每天最多一轮T，不因新波动反复交易');continue
-        if clock.time()>=time(14,45):row.update(phase='inactive',status='尾盘不开新T',reason='14:45后不新开做T，避免尾盘强行追回');continue
+        if clock.time() >= T_CUTOFF:
+            row.update(phase='inactive', status='尾盘不开新T',
+                       reason=f'{T_DEFAULTS["last_open_time"]}后不新开做T，避免尾盘强行追回')
+            continue
         base=held;available=availability.get(code) or {};confirmed=available.get('date')==day
         if confirmed:
             b=_integer(available.get('base_quantity'));a=_integer(available.get('available_quantity'))

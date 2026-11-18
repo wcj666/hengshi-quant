@@ -550,14 +550,15 @@ def single_cycle(*,mode,notify=False,force_demo=False,probe=False,interval=10):
     state['recent_alerts']=recent
     state['fetch_finished_at']=dt.datetime.now(dt.timezone.utc).isoformat()
     state['updated_at']=state['fetch_finished_at']
-    if not demo and not probe and market_open and cal_ok and risk['valid'] and health['all_held_usable'] and not health['block_new_signals']:
+    example_unconfirmed = cfg.get('account_profile') == 'example' and not account.get('initialized')
+    if not example_unconfirmed and not demo and not probe and market_open and cal_ok and risk['valid'] and health['all_held_usable'] and not health['block_new_signals']:
         record_equity(EQUITY_JOURNAL,at=state['fetch_finished_at'],config_hash=cfg_hash,
                       amount=risk['equity'],source_status='公开行情源时间戳已核验' if health['provider_timestamps_verified'] else '公开行情快照，源时间戳未核验')
     state['fetch_duration_seconds']=round(time.monotonic()-cycle_started_monotonic,2)
     state['source_freshness_note']='本机采集完成≠行情源时间。未核验源时间时仅供估算、禁止新交易信号。'
     if not demo and not probe:
-        saved=save_display_snapshot(STATUS_FILE.with_name('last_account_snapshot.json'),cfg,state,
-                                    historical=reference_only)
+        saved = not example_unconfirmed and save_display_snapshot(
+            STATUS_FILE.with_name('last_account_snapshot.json'), cfg, state, historical=reference_only)
         if reference_only:
             state['status']=('休市参考报价已获取；保留账户估算，不触发交易提醒' if saved
                              else '休市报价未完整核验；保留最近完整快照')

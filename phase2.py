@@ -281,7 +281,7 @@ def alert_rules(cfg,prices,universe, verified, mode):
             alerts.append({'code':'PORT','name':'组合风控','type':'预算接近/超额','price':equity,'level':cfg['baseline_equity']-cfg['max_additional_loss'],'detail':f'账户快照累计额外亏损¥{loss:.2f}，风险预算¥{cfg["max_additional_loss"]:.2f}，请核对实际持仓及成交价'})
     if strategy_enabled(cfg):
         remain=None
-        p_df=p_df.rename(columns={'基准价':'历史基准价（非V1额度）','相对11/6变动':'相对11/6历史变动'})
+        p_df=p_df.rename(columns={'基准价':'历史基准价（非V1额度）'})
     return pd.DataFrame(alerts,columns=['code','name','type','price','level','detail']),p_df,missing,equity,loss,remain
 
 

@@ -12,20 +12,17 @@ import math
 import os
 import secrets
 import threading
+from strategy_defaults import V1_DEFAULTS
+from strategy_v1 import enabled, strategy_prefs
 
 CST=ZoneInfo('Asia/Shanghai')
-DEFAULTS={'per_trade_risk':150.0,'min_fees':20.0,'max_position_pct':15.0,
-          'max_sector_pct':30.0,'max_exposure_pct':60.0,'max_positions':4,
-          'loss_budget':1000.0,'pause_drawdown':500.0,'reduce_drawdown':800.0}
+DEFAULTS = V1_DEFAULTS
 _EVIDENCE_LOCK=threading.Lock()
 _EVIDENCE_ATTEMPTS={}
 _PREPARE_POOL=ThreadPoolExecutor(max_workers=1,thread_name_prefix='v1-prepare')
 _PREPARE_LOCK=threading.Lock()
 _PREPARE_FLIGHT=None
 _PREPARE_KEY=None
-
-
-def enabled(cfg):return cfg.get('strategy_v1',{}).get('enabled') is True
 
 
 def read(path,default=None):
@@ -72,17 +69,16 @@ def ledger_hash(cfg):
 
 
 def settings(cfg):
-    result={**DEFAULTS,**{k:v for k,v in cfg.get('strategy_v1',{}).items() if k in DEFAULTS}}
-    result.update(fee_reserve=result['min_fees'],account_risk_budget=result['loss_budget'])
-    return result
+    return strategy_prefs(cfg)
 
 
 def validate_settings(body):
     # Version 1 risk limits can be tightened, not silently relaxed beyond the design.
-    ranges={'per_trade_risk':(1,150),'min_fees':(20,10000),'max_position_pct':(1,15),
-            'max_sector_pct':(1,30),'max_exposure_pct':(1,60),'max_positions':(1,4),
-            'loss_budget':(1,1000),'pause_drawdown':(1,500),'reduce_drawdown':(1,800)}
-    out={k:number(body.get(k,DEFAULTS[k]),*ranges[k]) for k in DEFAULTS}
+    keys = ('per_trade_risk', 'min_fees', 'max_position_pct', 'max_sector_pct',
+            'max_exposure_pct', 'max_positions', 'loss_budget', 'pause_drawdown', 'reduce_drawdown')
+    ranges = {key: (1, V1_DEFAULTS[key]) for key in keys}
+    ranges['min_fees'] = (V1_DEFAULTS['min_fees'], 10_000)
+    out = {key: number(body.get(key, V1_DEFAULTS[key]), *ranges[key]) for key in keys}
     if out['max_positions']!=int(out['max_positions']):raise ValueError('最大持仓数必须为整数')
     out['max_positions']=int(out['max_positions'])
     if not out['pause_drawdown']<=out['reduce_drawdown']<=out['loss_budget']:raise ValueError('暂停、减风险阈值不能超过总预算')
@@ -111,6 +107,7 @@ def latest_completed_day(output, now=None):
 
 def _account_view(output,cfg,account,now):
     account=dict(account)
+    account['example_unconfirmed'] = cfg.get('account_profile') == 'example' and not account.get('initialized')
     account['needs_reconcile']=bool(account.get('needs_reconcile') or (account.get('initialized') and account.get('ledger_hash')!=ledger_hash(cfg)))
     # Displaying the journal never certifies that prices remain fresh.
     account['verified']=bool(account.get('verified') and not account['needs_reconcile'])
@@ -150,7 +147,12 @@ def _lines(path):
 
 def get_account(output,cfg,now=None):
     now=now or datetime.now(CST)
-    raw=read(Path(output)/'strategy_account.json',{'initialized':False,'verified':False})
+    try:
+        raw=json.loads((Path(output)/'strategy_account.json').read_text(encoding='utf-8'))
+    except FileNotFoundError:
+        raw={'initialized':False,'verified':False}
+    except (OSError,ValueError):
+        raw=None
     if not isinstance(raw,dict):raw={'initialized':False,'verified':False,'needs_reconcile':True,'error':'V1账户记录损坏，需恢复备份'}
     return _account_view(output,cfg,raw,now)
 
@@ -166,8 +168,16 @@ def observe(output,cfg,equity,*,verified=False,at=None,reconcile=False):
     if not verified:return get_account(output,cfg,now)
     equity=number(equity,0.01)
     with locked(output):
-        path=Path(output)/'strategy_account.json'; a=read(path)
+        path=Path(output)/'strategy_account.json'
+        try:
+            a = json.loads(path.read_text(encoding='utf-8'))
+        except FileNotFoundError:
+            a = {}
+        except (OSError, ValueError) as error:
+            raise ValueError('V1账户记录不可读，禁止重置高水位') from error
         if not isinstance(a,dict):raise ValueError('V1账户记录损坏，禁止重置高水位')
+        if cfg.get('account_profile') == 'example' and not a.get('initialized') and not reconcile:
+            return _account_view(output, cfg, {'initialized': False, 'verified': False}, now)
         if a.get('initialized'):
             for key in ('initial_equity','high_water','adjusted_equity','drawdown','net_external_flow'):
                 number(a.get(key),-1e12 if key in ('adjusted_equity','net_external_flow') else 0)
@@ -256,7 +266,10 @@ def status(output,cfg):
         if not plan.get('buy_date') and cfg.get('strategy_v1',{}).get('exit_mode')!='price_first':missing.append('真实买入日期')
         legacy.append({**p,'missing':missing,'legacy':str(p['code']) in cfg.get('strategy_v1',{}).get('legacy_codes',[])})
     blockers=[]
-    if not account.get('initialized'):blockers.append('等待完整、源时间已核验的实时持仓行情初始化 V1')
+    if account.get('example_unconfirmed'):
+        blockers.append('当前为示例台账，请填写并确认实际账户后建立 V1 基准')
+    elif not account.get('initialized'):
+        blockers.append('等待完整、源时间已核验的实时持仓行情初始化 V1')
     if account.get('needs_reconcile'):blockers.append('持仓或现金、外部转账发生变动，需核对台账')
     if account.get('paused'):blockers.append(account.get('pause_reason') or '连续亏损/违规冷静期')
     blockers.extend(f"{p['name']}待补：{'、'.join(p['missing'])}" for p in legacy if p['missing'])

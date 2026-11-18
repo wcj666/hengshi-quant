@@ -7,7 +7,7 @@
   <title>衡势 · A股量化研究台</title>
   <link rel="icon" type="image/svg+xml" href="/static/hengshi-logo.svg">
   <link rel="stylesheet" href="/static/dashboard.css?v=3.6.1-strategy-v1">
-  <script defer src="/static/dashboard.js?v=3.6.1-strategy-v1"></script>
+  <script defer src="/static/dashboard.js?v=3.6.1-rules"></script>
   {% include '_live_reminder_assets.html' %}
   <link rel="stylesheet" href="/static/reduction_preview.css?v=1">
   <script defer src="/static/reduction_preview.js?v=2"></script>
@@ -119,17 +119,17 @@
             <span><b class="market-up">红色</b>表示盈利 / 上涨，<b class="market-down">绿色</b>表示亏损 / 下跌</span>
           </div>
         </div>
-        <div class="stat sub-stat baseline-stat"><span>基准总资产 <small>2026-11-06</small></span><strong id="baseline">—</strong><div>原账户历史参考 · V1另行记录高水位</div></div>
+        <div class="stat sub-stat baseline-stat"><span>基准总资产 <small id="baseline-date">—</small></span><strong id="baseline">—</strong><div>原账户历史参考 · V1另行记录高水位</div></div>
         <div class="stat sub-stat cash-stat"><span>可用现金 <small>手动维护台账</small></span><strong id="cash">—</strong><div>交易后请更新持仓和现金</div></div>
-        <div class="stat sub-stat accent remaining-stat"><span>剩余回撤预算</span><strong id="remaining">—</strong><div id="remaining-sub">上限 ¥1,000</div></div>
+        <div class="stat sub-stat accent remaining-stat"><span>剩余回撤预算</span><strong id="remaining">—</strong><div id="remaining-sub">等待核验</div></div>
       </div>
       <div class="overview-shortcuts"><a class="btn primary" href="#risk">查看持仓</a><a class="btn ghost" href="#watch">自选分析</a><a class="btn ghost" href="#daily-observe">每日观察</a><span>行情自动更新 · 手动维护持仓与现金</span></div>
-      <div class="risk-tier-banner" id="risk-tier-banner" role="status" aria-live="polite">V1账户回撤：500元暂停新增 / 800元减仓复核 / 1,000元暂停策略新增。</div>
+      <div class="risk-tier-banner" id="risk-tier-banner" role="status" aria-live="polite">等待当前账户风险规则</div>
 
       <div class="panel strategy-panel" id="strategy-panel">
         <div class="panel-head"><div><h3>交易体系 V1 · 1～2周波段</h3><p>上升趋势缩量回调后转强 · 固定计划 · 每天最多新开1只 · 不加仓、不摊平</p></div><span id="strategy-status" class="pill muted">加载规则中</span></div>
         <div class="strategy-rules" id="strategy-rules"></div>
-        <div id="strategy-account" class="signal-note">V1账户等待初始化及台账核对；原11月6日历史基准单独保留。</div>
+        <div id="strategy-account" class="signal-note">V1账户等待初始化及台账核对。</div>
         <div id="strategy-resume-controls" class="signal-note blocked" hidden><p>先记录触发后的完整复盘；恢复不重置回撤，高于暂停阈值仍不能新增。</p><button id="strategy-resume" class="btn ghost" type="button">已完成复盘，申请恢复新增核验</button></div>
         <div id="strategy-blockers" class="signal-note blocked">正在核对新增条件。</div>
         <div id="strategy-exposure" class="strategy-metrics"></div>

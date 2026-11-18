@@ -4,6 +4,8 @@ from math import isfinite
 from zoneinfo import ZoneInfo
 
 from quote_health import parse_provider_time
+from strategy_v1 import strategy_prefs
+from t_engine import T_CUTOFF
 from t_costs import cash_impact
 
 CN = ZoneInfo('Asia/Shanghai')
@@ -112,7 +114,7 @@ def signal_applicable(signal, quote, plans, now):
                 and quote.get('limit_status_verified') is not False)
     if trigger in ('sell_ready', 'buyback_ready'):
         if ((signal.get('tradable') is not True and signal.get('validation_status') not in ('pending', 'excluded'))
-                or now.time() >= time(14, 45)):
+                or now.time() >= T_CUTOFF):
             return False
         if trigger == 'buyback_ready':
             return level is not None and price <= level
@@ -229,7 +231,7 @@ def build_actions(cfg, state, book, *, now=None, output=None):
             t['expires_at'] = t_expiry.isoformat()
         if held and t is None and (cfg.get('t_settings') or {}).get('enabled') is True:
             t = t_card({'status': '等待分时与做 T 台账重新核验'}, None, None, mode)
-        t_cutoff = now.replace(hour=14, minute=45, second=0, microsecond=0)
+        t_cutoff = datetime.combine(now.date(), T_CUTOFF, CN)
         if t and t.get('buyback_cap') and t_expiry:
             t['expires_at'] = min(t_expiry, t_cutoff).isoformat()
         card = {'code': code, 'name': p.get('name', code),
@@ -300,14 +302,16 @@ def build_actions(cfg, state, book, *, now=None, output=None):
                     card['blockers'].append('含费用预留后现金不足')
         cards.append(card)
     equity = positive((state.get('risk') or {}).get('equity'))
-    reserve = equity * (1 - min(60., float((cfg.get('strategy_v1') or {}).get('max_exposure_pct', 60))) / 100) if valid and equity else None
+    limits = strategy_prefs(cfg)
+    reserve = max(equity * (1 - limits['max_exposure_pct'] / 100),
+                  limits['fee_reserve'] + 2 * limits['per_trade_risk']) if valid and equity else None
     signal_expiries = {}
     for signal in signals:
         code = signal['code']
         deadline = expires if code == 'PORT' else min(
             expires, parse_provider_time(quotes[code]['source_timestamp']) + timedelta(seconds=90))
         if signal.get('category') == 't':
-            deadline = min(deadline, t_deadlines[code], now.replace(hour=14, minute=45, second=0, microsecond=0))
+            deadline = min(deadline, t_deadlines[code], datetime.combine(now.date(), T_CUTOFF, CN))
         signal_expiries[signal['id']] = deadline.astimezone(CN).isoformat()
     for signal in ledger_signals:
         signal_expiries[signal['id']] = min(parse_provider_time(signal['expires_at']),

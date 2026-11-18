@@ -193,7 +193,8 @@ def _currently_active(row, now):
             or not 0 <= (now - last).total_seconds() <= 90):
         return False
     if ledger_notice(row):
-        return time(14, 45) <= now.time() < time(15)
+        from t_engine import T_CUTOFF
+        return T_CUTOFF <= now.time() < time(15)
     return row.get('code') == 'PORT' or bool(_quote_time(
         {'source_timestamp': row.get('latest_quote_at') or row.get('quote_at')}, now))
 

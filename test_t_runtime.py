@@ -6,6 +6,7 @@ import json
 import unittest
 from portfolio_test_fixture import account_fixture
 import t_runtime as tr
+from t_engine import _settings as signal_settings
 import strategy_runtime as storage
 from web_dashboard import create_app,CSRF,json_hash
 
@@ -16,6 +17,18 @@ class TRuntimeTests(unittest.TestCase):
         self.cfg['t_settings']={'enabled':True};self.now=datetime.now(tr.CST)
     def avail(self,qty=300):return tr.confirm_available(self.out,self.cfg,{'code':'600406','available_quantity':qty},self.now)
     def sell(self,qty=100):return tr.record_sell(self.out,self.cfg,{'code':'600406','quantity':qty,'sell_price':21,'sell_filled':True},self.now)
+    def test_legacy_without_t_section_remains_disabled_and_parameters_match_signals(self):
+        self.assertFalse(tr.settings({})['enabled'])
+        prefs = {'t_settings': {'enabled': True, 'fee_reserve': 5, 'max_fraction': 0,
+                                'stock_deviation_pct': .1, 'etf_deviation_pct': .1}}
+        observed = tr.settings(prefs)
+        self.assertTrue(observed['enabled'])
+        self.assertEqual(observed['fee_reserve'], 20)
+        self.assertEqual(observed['max_fraction'], 0)
+        self.assertEqual(observed['stock_deviation_pct'], .3)
+        self.assertEqual(observed['etf_deviation_pct'], .15)
+        self.assertEqual(observed['fee_model'], {})
+        self.assertEqual({key: observed[key] for key in signal_settings(prefs)}, signal_settings(prefs))
     def test_no_sellable_confirmation_no_cycle(self):
         with self.assertRaises(ValueError):self.sell()
         self.avail()

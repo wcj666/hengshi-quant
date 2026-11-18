@@ -1,13 +1,15 @@
 """Local T-observation journals. Actual fills are user supplied, never executed here."""
-from datetime import datetime
+from datetime import datetime, time
 from pathlib import Path
 import hashlib
 import json
 import secrets
 import threading
 import strategy_runtime as storage
+from strategy_defaults import T_DEFAULTS
 from quote_health import parse_provider_time
 from t_costs import money, nonnegative, summarize_cycle_costs
+from t_engine import T_CUTOFF, _settings as signal_settings
 
 CST=storage.CST
 _LOCK=threading.Lock()
@@ -15,11 +17,9 @@ _LAST={}
 
 
 def settings(cfg, book=None):
-    raw=cfg.get('t_settings',{})
-    return {'enabled':raw.get('enabled') is True,'mode':'sell_first',
-            'fee_reserve':max(20.,storage.number(raw.get('fee_reserve',20),0,100000)),
-            'max_fraction':min(1/3,storage.number(raw.get('max_fraction',1/3),0,1)),
-            'max_cycles_per_code':1,'last_open_time':'14:45',
+    raw = cfg.get('t_settings')
+    enabled = isinstance(raw, dict) and raw.get('enabled') is True
+    return {**T_DEFAULTS, **signal_settings(cfg), 'enabled':enabled,
             'fee_model':(book or {}).get('fee_model',{}),
             'note':'仅条件观察；不自动下单。先买后卖暂不给可执行提示，不能使用当日新买股票充当可卖底仓。'}
 
@@ -301,7 +301,7 @@ def observe(output,cfg,quotes,risk,*,now=None,market_session=False,calendar_ok=F
     try:
         book=ledger(output,cfg,now);cache=storage.read(Path(output)/'t_minutes.json')
         enabled=settings(cfg)['enabled']
-        closeout_due=now.hour==14 and now.minute>=45 and any(
+        closeout_due=T_CUTOFF <= now.astimezone(CST).time() < time(15) and any(
             cycle.get('status')=='open' and cycle.get('date')==str(now.date()) for cycle in book['cycles'])
         if not enabled and not closeout_due:
             return {'enabled':False,'rows':[],'signals':[],'status':'做T观察未启用'}

@@ -13,6 +13,16 @@ def _number(value):
     return value if math.isfinite(value) else None
 
 
+def _thresholds(risk, budget):
+    settings = risk.get('settings') or {}
+    if (risk.get('strategy') or {}).get('enabled'):
+        pause = _number(settings.get('pause_drawdown'))
+        reduce = _number(settings.get('reduce_drawdown'))
+        if pause is not None and reduce is not None and 0 <= pause <= reduce <= budget:
+            return pause, reduce, budget
+    return tuple(budget * ratio for ratio in TIERS)
+
+
 def tier_alerts(risk):
     if not risk or not risk.get('valid'):return []
     budget=_number(risk.get('budget'))
@@ -21,11 +31,13 @@ def tier_alerts(risk):
     messages=[]
     # Report only the highest reached tier per cycle. On a sudden gap-down, do
     # not send three popups for 50/80/100% at the same moment.
-    reached=[ratio for ratio in TIERS if used>=budget*ratio]
+    reached = [(ratio, level) for ratio, level in zip(TIERS, _thresholds(risk, budget)) if used >= level]
     if reached:
-        ratio=max(reached)
-        messages.append({'code':'PORT','name':'全账户','kind':f'回撤预算使用{round(ratio*100)}%预警',
-                         'level':round(budget*ratio,2),'price':round(used,2),'tier':int(ratio*100)})
+        ratio, level = reached[-1]
+        label = f'回撤预算使用{round(ratio*100)}%预警' if abs(level - budget * ratio) < .001 else (
+            f'回撤达到{level:g}元{ "暂停新增线" if ratio == .5 else "减风险复核线"}')
+        messages.append({'code':'PORT','name':'全账户','kind':label,
+                         'level':round(level,2),'price':round(used,2),'tier':int(ratio*100)})
     stress=_number(risk.get('existing_planned_stress'));remaining=_number(risk.get('remaining'))
     if stress is not None and remaining is not None and stress>remaining:
         messages.append({'code':'PORT','name':'全账户','kind':'持仓压力损失超剩余预算',
@@ -41,14 +53,16 @@ def risk_level(risk):
         return {'level':'unavailable','label':'固定止损或账户统计未核验；暂停新增','used_pct':None}
     raw_pct=100*max(0,used)/budget
     pct=round(raw_pct,1)
-    drawdown_level='critical' if raw_pct>=100 else 'high' if raw_pct>=80 else 'watch' if raw_pct>=50 else 'normal'
+    pause, reduce, _ = _thresholds(risk, budget)
+    drawdown_level='critical' if used>=budget else 'high' if used>=reduce else 'watch' if used>=pause else 'normal'
     pressure=stress>remaining
     breached=bool(risk.get('stop_breaches'))
     level='critical' if pressure or breached or risk.get('over_budget') else drawdown_level
     label=('持仓已触及止损参考' if breached else '持仓压力超剩余预算' if pressure
-           else {'critical':'回撤预算已用尽','high':'回撤已用80%以上','watch':'回撤已用50%以上','normal':'未触及回撤预警'}[drawdown_level])
+           else {'critical':'回撤预算已用尽','high':f'回撤已达{reduce:g}元减风险复核线',
+                 'watch':f'回撤已达{pause:g}元暂停新增线','normal':'未触及回撤预警'}[drawdown_level])
     return {'level':level,'label':label,'drawdown_level':drawdown_level,'pressure_exceeded':pressure,
-            'used_pct':pct,'thresholds':[50,80,100]}
+            'used_pct':pct,'thresholds':[round(level / budget * 100, 2) for level in (pause, reduce, budget)]}
 
 
 

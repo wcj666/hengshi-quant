@@ -11,9 +11,10 @@ import secrets
 from quote_health import parse_provider_time
 from strategy_runtime import CST, write
 from strategy_v1 import strategy_prefs
+from strategy_defaults import BACKTEST_ENGINE_FILES
 
 FILES = ('strategy_setup.py', 'strategy_v1.py', 'risk_engine.py', 'trade_signals.py',
-         't_engine.py', 't_runtime.py', 't_costs.py', 'action_center.py', 'alert_journal.py',
+         'strategy_defaults.py', 't_engine.py', 't_runtime.py', 't_costs.py', 'action_center.py', 'alert_journal.py',
          'v1_backtest.py', 'v1_backtest_data.py',
          'reminder_validation.py', 't_history_replay.py', 'reminder_policy.py')
 KINDS = {'v1_entry': 'breakout', 'take_profit_1': 'take_profit_1',
@@ -55,11 +56,8 @@ def publish_evidence(output, cfg, bundle, result, *, now=None):
     from t_engine import _settings as t_parameters
     if t_parameters(cfg) != t_parameters({}):
         raise ValueError('当前做T参数与历史回放默认参数不同，需要重新验证')
-    engine_files = ('v1_backtest.py', 'v1_backtest_data.py', 'v1_backtest_report.py',
-                    'strategy_setup.py', 'strategy_v1.py', 'risk_engine.py', 'trade_levels.py',
-                    'quote_health.py', 'pnl_engine.py')
     root = Path(__file__).resolve().parent
-    current_engine = sha256(b''.join((root / f).read_bytes() for f in engine_files)).hexdigest()
+    current_engine = sha256(b''.join((root / f).read_bytes() for f in BACKTEST_ENGINE_FILES)).hexdigest()
     if result['meta'].get('engine_sha256') != current_engine:
         raise ValueError('回放引擎版本已经变化，保持待验证')
     try:

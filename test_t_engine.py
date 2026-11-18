@@ -96,6 +96,20 @@ class TEngineTests(unittest.TestCase):
         risk=deepcopy(self.risk);risk['strategy']['exposure_pct']=82.
         row=self.call(risk=risk)['rows'][0];self.assertEqual(row['phase'],'sell_watch');self.assertFalse(row['tradable']);self.assertIsNone(row['quantity'])
         self.assertIn('接回',row['reason'])
+    def test_tightened_v1_drawdown_blocks_opening_and_buyback_consistently(self):
+        cfg = deepcopy(self.cfg)
+        cfg['strategy_v1']['pause_drawdown'] = 300
+        risk = deepcopy(self.risk)
+        risk['strategy']['account']['drawdown'] = 350
+        sell = self.call(cfg=cfg, risk=risk)['rows'][0]
+        self.assertEqual(sell['phase'], 'sell_watch')
+        self.assertIsNone(sell['quantity'])
+        args = self.buyback_fixture()
+        args['cfg']['strategy_v1']['pause_drawdown'] = 300
+        args['risk'] = risk
+        buyback = self.call(**args)['rows'][0]
+        self.assertEqual(buyback['phase'], 'buyback_blocked')
+        self.assertIn('达到300元暂停线', buyback['reason'])
     def test_limits_pause_observation(self):
         for flag in ['at_limit_up','at_limit_down']:
             q=deepcopy(self.quote);q[self.code][flag]=True;self.assertEqual(self.call(quotes=q)['signals'],[])

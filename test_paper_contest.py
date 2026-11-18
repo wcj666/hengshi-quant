@@ -2,7 +2,9 @@
 from copy import deepcopy
 from datetime import datetime
 import unittest
-from paper_contest import initialize,execute,observe,fees,sellable,validate_state,preview_trade,CN
+from paper_contest import initialize,execute,observe,fees,sellable,validate_state,preview_trade,CN,fixed_rules_hash
+from strategy_defaults import initial_v1_rules
+from v1_backtest import DEFAULT_COSTS
 
 DAYS=['2026-11-12','2026-11-13','2026-11-16','2026-11-17','2026-11-18','2026-11-19','2026-11-20']
 
@@ -43,6 +45,32 @@ class PaperContestTests(unittest.TestCase):
         with self.assertRaises(ValueError):validate_state(state)
         state=account();state['cash']+=100
         with self.assertRaises(ValueError):validate_state(state)
+
+    def test_new_and_previous_ledgers_share_defaults_without_rewriting_previous_rules(self):
+        state=account();previous=deepcopy(state)
+        self.assertEqual(state['policy'],initial_v1_rules())
+        for key,cost in DEFAULT_COSTS.items():
+            paper_key='book_fraction' if key=='prior_minute_participation' else key
+            self.assertEqual(state['fees'][paper_key],cost)
+        for key in ('account_risk_budget','max_daily_opens','enabled','version'):
+            previous['policy'].pop(key)
+        previous['fixed_rules_hash']=fixed_rules_hash(previous)
+        before=deepcopy(previous)
+        validate_state(previous)
+        self.assertEqual(previous,before)
+
+    def test_opening_snapshot_requires_consistent_cash_value_and_asof(self):
+        snapshot=account()['opening_snapshot']
+        now=datetime(2026,11,12,18,tzinfo=CN)
+        for invalid in (
+            dict(snapshot, available_cash=-1),
+            dict(snapshot, total_assets=0.),
+            dict(snapshot, total_market_value=1.),
+            dict(snapshot, asof='2026-11-12T15:07:00'),
+            dict(snapshot, asof='2026-11-13T09:30:00+08:00'),
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                initialize(invalid,DAYS,'2026-11-13','2026-11-19',now=now)
 
     def test_provider_book_prices_and_lot_units_are_not_last_price(self):
         from portfolio_quotes import _parse_tencent_quotes

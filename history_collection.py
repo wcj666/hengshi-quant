@@ -260,6 +260,7 @@ def contiguous_windows(bundle, settings):
 
 
 def auto_validate(bundle, settings, work, runtime_output):
+    from reminder_policy import _parameters, _version, publish_evidence
     from v1_validation import evaluate, save_comparison
 
     windows, sessions = contiguous_windows(bundle, settings)
@@ -271,7 +272,10 @@ def auto_validate(bundle, settings, work, runtime_output):
                 if clock <= datetime.combine(date.fromisoformat(day), time(15, 5), CST)]
     bundle = {**bundle, 'universe': {day: list(bundle['securities']) for day in selected},
               'universe_source': f'事前登记的本地 ETF 研究篮子，登记 {settings["registered_at"]}'}
-    digest = hashlib.sha256(json.dumps([bundle, windows, settings],
+    cfg_path = runtime_output.parent / 'config.json'
+    cfg = _read_dict(cfg_path) if cfg_path.is_file() else None
+    active_parameters = _parameters(runtime_output, cfg) if cfg is not None else None
+    digest = hashlib.sha256(json.dumps([bundle, windows, settings, _version(), active_parameters],
                                        sort_keys=True, allow_nan=False).encode()).hexdigest()
     state = _read_dict(work/'validation.json')
     if digest == state.get('digest'):
@@ -282,11 +286,9 @@ def auto_validate(bundle, settings, work, runtime_output):
     status = {'status': '已完成自动分段' if qualified else '已分段，部分或全部仍待验证',
               'message': '自动按时间分段，样本不足仍保留待验证。固定止损纳入风控。'}
     save_comparison(result, runtime_output/'v1_validation')
-    cfg_path = runtime_output.parent / 'config.json'
-    if cfg_path.is_file():
-        from reminder_policy import publish_evidence
+    if cfg is not None:
         try:
-            publish_evidence(runtime_output, _read_dict(cfg_path), bundle, result)
+            publish_evidence(runtime_output, cfg, bundle, result)
         except ValueError as exc:
             status['message'] += ' 提醒等级保持待验证：' + str(exc)
     write(work/'validation.json', {'digest': digest, 'status': status})

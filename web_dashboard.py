@@ -634,7 +634,10 @@ def create_app(folder:Path=ROOT):
     def strategy_settings():
         body=dict(request.get_json(silent=True) or {})
         for alias,key in [('fee_reserve','min_fees'),('account_risk_budget','loss_budget')]:
-            if alias in body:body[key]=body[alias]
+            if alias in body:
+                if key in body and strategy.number(body[alias]) != strategy.number(body[key]):
+                    raise ValueError('同一设置提交了两个不一致的数值')
+                body[key]=body[alias]
         with WRITE_LOCK:
             cfg=config();values=strategy.validate_settings({**strategy.settings(cfg),**body})
             cfg.setdefault('strategy_v1',{}).update(values)
@@ -652,6 +655,12 @@ def create_app(folder:Path=ROOT):
     def strategy_reconcile():
         with WRITE_LOCK:
             cfg,prices=current_risk_snapshot()
+            account = strategy.get_account(output, cfg)
+            body = request.get_json(silent=True) or {}
+            if not isinstance(body, dict):
+                raise ValueError('账户核对请求格式错误')
+            if account.get('example_unconfirmed') and body.get('confirmed_actual_account') is not True:
+                raise ValueError('首次核对前请确认台账已更新为你的实际持仓和现金')
             state=strategy.read(output/'intraday_status.json')
             if state.get('quote_health',{}).get('block_trade_signals'):
                 raise ValueError('行情源时间未核验，暂不能核对 V1 账户')
@@ -701,6 +710,17 @@ def create_app(folder:Path=ROOT):
             payload['status']='非有效盘中、行情过期或台账已变化；暂停做T提示，保留记录供核对'
             payload['rows']=[{**row,'quantity':None,'tradable':False,'last_status':row.get('status'),'status':'暂停提示',
                               'blockers':list(dict.fromkeys(row.get('blockers',[])+['当前盘中快照未核验']))} for row in payload.get('rows',[])]
+        else:
+            from reminder_policy import apply_policy
+
+            payload['signals'] = apply_policy(output, cfg, payload.get('signals', []))
+            limited = {(s['code'], s['trigger']): s for s in payload['signals']
+                       if s.get('validation_status') in ('pending', 'excluded')}
+            for row in payload['rows']:
+                signal = limited.get((row['code'], row.get('phase')))
+                if signal:
+                    row.update(quantity=None, tradable=False, status=signal['title'],
+                               blockers=signal['blockers'], validation_status=signal['validation_status'])
         return jsonify(payload)
 
     def notification_status(row):
