@@ -64,7 +64,7 @@
 @keyframes slideUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}
 @media(max-width:750px){.sidebar{overflow-x:auto}.sidebar-sub-label{display:none}.nav-counter{display:none}.trade-signal-popup{bottom:10px;right:10px;left:10px;width:auto}.signal-card{padding:14px}}
 
-/* V3.5 — auto-updated daily research queue and simplified Chan structure */
+/* Daily research and Chan structure */
 .daily-section{scroll-margin-top:20px}
 .daily-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(305px,1fr));gap:14px;margin-bottom:18px}
 .daily-card{background:#fff;border:1px solid #dce5eb;border-radius:14px;padding:18px;box-shadow:var(--shadow);min-width:0}
@@ -73,21 +73,15 @@
 .daily-card .daily-header small{display:block;color:#8694a2;font-size:11px;margin-top:4px}
 .daily-card .daily-rank{background:#e9f5f2;color:#157b70;border-radius:10px;padding:6px 9px;font-size:12px;font-weight:750;white-space:nowrap}
 .daily-card .daily-price{font-weight:750;font-size:22px;margin:13px 0 6px;letter-spacing:-.4px}
-.daily-card .daily-stats{display:flex;flex-wrap:wrap;gap:7px 14px;font-size:11px;color:#687c8f}
-.daily-card .daily-levels{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin:13px 0}
-.daily-card .daily-levels>div{padding:9px 5px;text-align:center;background:#f5f8fa;border-radius:8px;min-width:0}
-.daily-card .daily-levels small{display:block;font-size:10px;color:#728396}
-.daily-card .daily-levels strong{display:block;font-size:14px;margin-top:3px}
-.daily-card .daily-levels .stop strong{color:#ba4757}.daily-card .daily-levels .tp strong{color:#158974}.daily-card .daily-levels .tp2 strong{color:#447ab1}
-.daily-card .daily-condition{border-left:3px solid #6892a8;padding:6px 10px;background:#f4f8fa;font-size:12px;line-height:1.5;color:#475f74}
-.daily-card .daily-reason{font-size:11px;color:#647688;line-height:1.5;min-height:33px}
-.daily-card .daily-risk{font-size:11px;border-radius:7px;padding:9px 10px;background:#fff7ec;color:#7d603a;margin:12px 0}
+.daily-card .daily-price small{font-size:13px;letter-spacing:0}
+.daily-card .daily-close-label,.daily-card .daily-stats{font-size:12px;color:#687c8f}
+.daily-card .daily-reason{font-size:13px;color:#475f74;line-height:1.55}
 .daily-card .daily-actions{display:flex;flex-wrap:wrap;gap:7px;margin-top:12px}
 .chan-study{margin-top:22px;padding:16px 0 0;border-top:1px solid #e3eaf0;scroll-margin-top:16px}
 .chan-chart{overflow:auto;margin:12px 0}.chan-chart svg{max-width:100%;background:#f8fafc;border:1px solid #e5ecf0;border-radius:10px}
 .chan-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px}
 .chan-mini{padding:12px;background:#f5f8fa;border-radius:8px}.chan-mini small{display:block;color:#728396;font-size:10px;margin-bottom:4px}.chan-mini strong{color:#2b455b;font-size:14px}
-@media(max-width:550px){.daily-grid{grid-template-columns:1fr}.daily-card .daily-levels{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:550px){.daily-grid{grid-template-columns:1fr}}
 
 /* V3.5.2 — overview: floating P&L, daily reference P&L, then snapshot equity */
 .stats{grid-template-columns:repeat(3,minmax(0,1fr))}

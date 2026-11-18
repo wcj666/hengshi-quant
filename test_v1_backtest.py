@@ -171,18 +171,17 @@ class ReplayTests(TestCase):
         self.assertIsNone(result['summary']['end_equity'])
         self.assertIsNone(result['summary']['max_drawdown'])
 
-    def test_backtest_page_reads_only_private_reports(self):
+    def test_standalone_backtest_has_no_web_entry_or_download(self):
         from web_dashboard import create_app
         with TemporaryDirectory() as folder:
             root = Path(folder)
             client = create_app(root).test_client()
-            self.assertEqual(client.get('/api/backtest').status_code, 404)
             save_report(run_backtest(demo_bundle(), START, END), root / 'output' / 'v1_backtest')
-            self.assertEqual(client.get('/backtest').status_code, 200)
-            self.assertTrue(client.get('/api/backtest').json['meta']['demo'])
-            with client.get('/backtest/download/equity_curve.csv') as download:
-                self.assertEqual(download.status_code, 200)
-            self.assertEqual(client.get('/backtest/download/config.json').status_code, 404)
+            self.assertEqual(client.get('/backtest').status_code, 404)
+            self.assertEqual(client.get('/api/backtest').status_code, 404)
+            self.assertEqual(client.get('/backtest/download/equity_curve.csv').status_code, 404)
+            with client.get('/') as dashboard:
+                self.assertNotIn(b'href="/backtest"', dashboard.data)
             self.assertFalse((root / 'config.json').exists())
 
     def test_validation_dashboard_reads_only_comparison(self):
@@ -191,8 +190,9 @@ class ReplayTests(TestCase):
         with TemporaryDirectory() as folder:
             root = Path(folder)
             client = create_app(root).test_client()
-            self.assertIn(b'/backtest/validation', client.get('/backtest').data)
-            self.assertEqual(client.get('/backtest/validation').status_code, 200)
+            with client.get('/backtest/validation') as dashboard:
+                self.assertEqual(dashboard.status_code, 200)
+                self.assertNotIn(b'href="/backtest"', dashboard.data)
             self.assertEqual(client.get('/api/backtest/validation').status_code, 404)
             path = root / 'output' / 'v1_validation' / 'comparison.json'
             write(path, {'meta': {'demo': True}, 'periods': []})

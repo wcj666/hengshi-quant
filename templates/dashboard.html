@@ -6,8 +6,8 @@
   <meta name="csrf-token" content="{{ csrf }}">
   <title>衡势 · A股量化研究台</title>
   <link rel="icon" type="image/svg+xml" href="/static/hengshi-logo.svg">
-  <link rel="stylesheet" href="/static/dashboard.css?v=3.6.1-strategy-v1">
-  <script defer src="/static/dashboard.js?v=3.6.1-costs"></script>
+  <link rel="stylesheet" href="/static/dashboard.css?v=3.6.1-daily">
+  <script defer src="/static/dashboard.js?v=3.6.1-daily"></script>
   {% include '_live_reminder_assets.html' %}
   <link rel="stylesheet" href="/static/reduction_preview.css?v=1">
   <script defer src="/static/reduction_preview.js?v=2"></script>
@@ -25,7 +25,6 @@
       <a href="/close-review" class="nav-link">◷ <span>收盘复盘</span></a>
       <a href="/trade-reconcile" class="nav-link">≡ <span>成交对账</span></a>
       <a href="/paper-contest" class="nav-link">◈ <span>模拟持仓</span></a>
-      <a href="/backtest" class="nav-link">▥ <span>V1 逐笔回测</span></a>
       <a href="#scanner" class="nav-link">▥ <span>全市场筛选</span></a>
       <details class="nav-group"><summary>交易观察</summary>
         <a href="/alert-journal" class="nav-link">◷ <span>盘中提醒记录</span></a>
@@ -184,12 +183,12 @@
     <section id="scanner"><div class="section-heading"><div><span class="eyebrow">04 / STOCK SCANNER</span><h2>强势股票筛选</h2><p>先批量快照筛选，再对候选做日线验证；评分只是研究排序。</p></div></div>        <div class="panel"><div class="panel-head"><div><h3>最近扫描</h3><p>扫描需要数分钟，完成后自动更新。</p></div></div><div class="scan-details"><div><span>报告模式</span><strong id="scan-mode">—</strong></div><div><span>生成时间</span><strong id="scan-time">—</strong></div><div><span>收到报价</span><strong id="scan-count">—</strong></div><div><span>日线复核</span><strong id="verify-count">—</strong></div></div><div class="btn-row"><button class="btn primary" id="live-scan">联网执行筛选</button><details class="demo-option"><summary>演示测试</summary><button class="btn ghost" id="demo-scan">运行演示（会替换报告）</button></details><a class="btn ghost" href="/report" target="_blank" rel="noopener">查看完整报告 ↗</a></div><p id="scan-source" class="tip"></p><p id="job-message" class="job-msg" role="status">本次网页会话未运行扫描</p></div>
 <div class="panel"><div class="table-tabs"><button class="table-tab selected" data-tab="verified">日线验证榜</button><button class="table-tab" data-tab="candidate">快照初筛榜</button><span class="table-help">最多显示前30名</span></div><div id="ranking-table" class="table-wrap"></div></div></section>
     <section id="daily-observe" class="daily-section">
-      <div class="section-heading"><div><span class="eyebrow">05 / DAILY FIVE · REVIEW ONLY</span><h2>每日观察 · 最多5只</h2><p>盘后从全市场初筛与日线复核中选出最多5只，结合量价、趋势及简化缠论结构评分。不是确保上涨的买入推荐。</p></div><span id="daily-pill" class="pill muted">尚无扫描</span></div>
-      <div id="daily-warning" class="signal-note blocked">请先完成盘后联网扫描。历史名单不可直接用于今日买卖。</div>
-      <div class="daily-grid" id="daily-list"><div class="panel"><p class="tip">尚无每日候选。</p></div></div>
-      <div class="panel"><div class="panel-head"><div><h3>观察区管理</h3><p>每日自动替换研究名单，不覆盖你的人工自选股。可手动转入自选或排除不感兴趣的股票。</p></div><button class="btn ghost" id="daily-refresh">↻ 更新名单</button></div>
+      <div class="section-heading"><div><h2>每日观察 · 最多 5 只</h2><p>按最近完整日线推荐研究候选，买入请另行查看交易计划。</p></div><span id="daily-pill" class="pill muted">读取中</span></div>
+      <p id="daily-warning" class="signal-note blocked" role="status" hidden></p>
+      <div class="daily-grid" id="daily-list"></div>
+      <div class="panel"><div class="panel-head"><h3>观察区管理</h3><button class="btn ghost" id="daily-refresh">↻ 更新显示</button></div>
       <form class="inline-form" id="daily-restore-form"><label>恢复被排除的股票代码<input name="code" inputmode="numeric" maxlength="6" placeholder="如 600406" required></label><button class="btn ghost" type="submit">取消排除</button></form>
-      <p id="daily-excludes" class="tip">排除清单：—</p><p class="tip">每日候选仅供研究，V1须另行完成固定形态核验、准备计划和人工复核。风险预算不够时不显示可新增股数；实际成交前必须重新核对券商报价和持仓。</p></div>
+      <p id="daily-excludes" class="tip"></p></div>
     </section>
     <section id="sectors"><div class="section-heading"><div><span class="eyebrow">06 / SECTOR MOMENTUM</span><h2>行业强度排行榜</h2><p>按当日涨跌幅与上涨家数占比计算；不代表资金净流入。</p></div></div><div class="panel"><div id="sector-table" class="table-wrap"></div></div></section>
     <section id="watch"><div class="section-heading"><div><span class="eyebrow">07 / WATCHLIST</span><h2>我的证券观察池</h2><p>随时新增、删除；可在分析图上查看红色止损线、第一和第二止盈线，并自行锁定价位。</p></div></div>

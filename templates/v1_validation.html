@@ -17,7 +17,7 @@
   <header class="topbar">
     <div class="title-group">
       <img src="/static/hengshi-logo.svg" alt="" width="48" height="48">
-      <div><a class="back-link" href="/backtest">← V1 逐笔回测</a><h1>回测区间对照</h1></div>
+      <div><a class="back-link" href="/">← 衡势研究台</a><h1>回测区间对照</h1></div>
     </div>
     <button id="refresh" type="button">刷新报告</button>
   </header>
@@ -67,7 +67,6 @@
     <div id="reminder-validation-empty" hidden>
       <p>用已导入的历史回放数据包生成报告。运行时指定开发、验证和留出三个互不重叠的区间。</p>
       <p>用 <code>v1_validation.py --bundle</code> 读取既有数据。可用 <code>--baseline-code</code> 指定数据包中的持有基准。做 T 另需原始分钟成交额和预先记录的底仓场景。</p>
-      <a href="/backtest">查看回放数据包和导入说明</a>
     </div>
     <div id="reminder-validation-results" hidden>
       <p id="reminder-validation-source" class="subtle reminder-source"></p>

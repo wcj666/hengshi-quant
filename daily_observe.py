@@ -2,8 +2,70 @@
 from __future__ import annotations
 import math
 import json
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
+
+
+def select_research(verified_rows, cfg, *, expected_day):
+    """Rank completed stock bars for observation, independently of V1 entry eligibility."""
+    if not expected_day:
+        return []
+    exclude = {str(code).zfill(6) for code in cfg.get('daily_excludes', [])}
+    observed = set()
+    rows = []
+    for source in verified_rows:
+        code = str(source.get('股票代码', '')).zfill(6)
+        name = str(source.get('股票名称', '')).strip()
+        if (str(source.get('日期')) != expected_day or code in exclude or code in observed
+                or not re.fullmatch(r'(?:00|60)\d{4}', code) or not name
+                or re.search(r'ST|退', name, re.IGNORECASE)):
+            continue
+        try:
+            close, change = float(source['收盘']), float(source['涨跌幅%'])
+            if not math.isfinite(close) or close <= 0 or not -4 <= change <= 8:
+                continue
+            setup = json.loads(source['V1形态证据'])
+            checks = {row['name'] for row in setup['checks'] if row['passed'] is True}
+            evidence = setup.get('evidence', {})
+            # Old completed scans carry equivalent price/volume evidence in V1.
+            research = source.get('研究证据')
+            if isinstance(research, str):
+                evidence = json.loads(research)
+            amount = float(evidence['amount20'])
+            volume = float(evidence['signal_volume_ratio5'])
+            if not math.isfinite(amount) or amount < 100_000_000 or not math.isfinite(volume) or volume <= 0:
+                continue
+            trend = evidence.get('research_uptrend', '趋势' in checks)
+            breakout = evidence.get('research_breakout', '信号日重新转强' in checks)
+            if not (trend or breakout):
+                continue
+        except (KeyError, ValueError, TypeError, AttributeError):
+            continue
+        reasons = []
+        if breakout:
+            reasons.append('放量越过前一日高点，收在5日均线上方')
+        if trend:
+            reasons.append('20日均线向上，且高于60日均线')
+        if '固定3日回调' in checks:
+            reasons.append('近三日回调守住20日均线')
+        if '回调缩量' in checks:
+            reasons.append('回调期间成交量收缩')
+        if not breakout:
+            reasons.append('等待新的放量突破')
+        score = (4 * breakout + 3 * trend + 2 * ('固定3日回调' in checks)
+                 + ('回调缩量' in checks) + ('固定价格区间' in checks) - (abs(change) > 5))
+        observed.add(code)
+        rows.append({'code': code, 'name': name, 'asof': expected_day,
+                     'close': round(close, 3), 'pct': round(change, 2),
+                     'volume_ratio': round(volume, 2), 'amount20': amount,
+                     'total_score': score, 'reasons': reasons,
+                     'research_only': True, 'can_buy_now': False})
+    rows.sort(key=lambda row: (-row['total_score'], -row['amount20'], row['code']))
+    shortlist = rows[:5]
+    for rank, row in enumerate(shortlist, 1):
+        row['rank'] = rank
+    return shortlist
 
 
 def _select_v1(verified,cfg,mode,generated_at):

@@ -325,31 +325,6 @@ def create_app(folder:Path=ROOT):
         from alert_journal import load_journal
         return jsonify(load_journal(output, config().get('reconciled_trades', [])))
 
-    @app.route('/backtest')
-    def backtest_page():
-        return render_template('v1_backtest.html')
-
-    @app.route('/api/backtest')
-    def backtest_data():
-        from reminder_policy import compare_live_parameters
-
-        path = output / 'v1_backtest' / 'result.json'
-        if not path.is_file():
-            return jsonify(error='尚未生成回测报告。请先在项目目录运行合成样例或导入历史数据包。'), 404
-        records = strategy.read(path)
-        if not isinstance(records, dict) or not isinstance(records.get('summary'), dict):
-            return jsonify(error='回测报告损坏，请重新生成。'), 409
-        return jsonify({**records, 'current_parameter_note': compare_live_parameters(output, records.get('meta') or {})})
-
-    @app.route('/backtest/download/<name>')
-    def download_backtest(name):
-        if name not in BACKTEST_FILES:
-            return jsonify(error='未知回测文件'), 404
-        path = output / 'v1_backtest' / name
-        if not path.is_file():
-            return jsonify(error='尚未生成该回测文件'), 404
-        return send_file(path, as_attachment=True)
-
     @app.route('/backtest/validation')
     def backtest_validation_page():
         return render_template('v1_validation.html')
@@ -978,21 +953,31 @@ def create_app(folder:Path=ROOT):
             reason=meta.get('failure') or '扫描失败'
             return jsonify(shortlist=[],count=0,status=reason,mode=out_mode,asof=None,stale=True,
                            blockers=[reason],source_errors=[reason],excluded=cfg.get('daily_excludes',[]))
+        expected=strategy.latest_completed_day(output)
+        excluded={str(x).zfill(6) for x in cfg.get('daily_excludes',[])}
+        if strategy.enabled(cfg):
+            from daily_observe import select_research
+
+            asof=meta.get('verified_asof') if out_mode=='live' and meta.get('scan_ok') is True else None
+            stale=not expected or asof!=expected
+            rows=select_research(safe_csv(output/'verified_top.csv',150),cfg,expected_day=expected) if not stale else []
+            watched={code_str(x['code']) for x in cfg.get('watchlist',[])}
+            for row in rows:
+                row['in_watchlist']=row['code'] in watched
+            message=('等待最近交易日的完整日线' if stale else
+                     '盘后研究推荐' if rows else '今天暂无符合趋势或放量转强条件的候选')
+            return jsonify(mode=out_mode,asof=asof,generated_at=meta.get('generated_at'),
+                           count=len(rows),shortlist=rows,stale=stale,status=message,excluded=sorted(excluded),
+                           strategy_version='1.0')
         path=output/('daily_observe_demo.json' if out_mode=='demo' else 'daily_observe.json')
         try:
             data=json.loads(path.read_text(encoding='utf-8'))
         except (OSError, ValueError):
             return jsonify(shortlist=[],count=0,status='尚未生成每日观察榜，请执行盘后扫描',mode=out_mode,asof=None,stale=True)
-        if strategy.enabled(cfg) and data.get('strategy_version')!='1.0':
-            return jsonify(shortlist=[],count=0,status='V1已启用，等待按固定3日回调转强规则重新扫描',mode=out_mode,
-                           asof=None,stale=True,strategy_version='1.0',excluded=cfg.get('daily_excludes',[]),
-                           disclaimer='旧版评分榜不作为V1候选；不凑足5只。')
-        expected=strategy.latest_completed_day(output)
         asof=data.get('asof')
         if not asof and not data.get('shortlist') and meta.get('scan_ok') is True:
             asof=meta.get('verified_asof')
         stale=not expected or asof!=expected or data.get('mode')!='live'
-        excluded={str(x).zfill(6) for x in cfg.get('daily_excludes',[])}
         rows=[x.copy() for x in data.get('shortlist',[]) if x.get('code') not in excluded]
         user_codes={code_str(x['code']) for x in cfg.get('watchlist',[])}
         for item in rows:
@@ -1003,8 +988,6 @@ def create_app(folder:Path=ROOT):
         status=('演示合成数据，禁止交易' if out_mode=='demo' else
                 '最近交易日日线技术观察，非实时买入推荐' if not stale else
                 '数据已过期或日期不一致，暂停作为今日候选')
-        if strategy.enabled(cfg):status=(data.get('status','V1固定形态观察，须准备次日计划并人工核验')+
-                                       ('；数据日期未核验/已过期，不可作为今日候选' if stale else ''))
         return jsonify(mode=out_mode,asof=asof,generated_at=data.get('generated_at'),
                        count=len(rows),shortlist=rows,stale=stale,status=status,
                        excluded=sorted(excluded),disclaimer=data.get('disclaimer','仅供研究，非自动下单'),

@@ -56,6 +56,25 @@ refresh=async()=>{calls.push('refresh');return true;};
 })();
 ''')
 
+    def test_daily_cards_show_research_without_exposing_execution_levels(self):
+        self.run_js(r'''
+const entry={code:'600150',name:'中国船舶',asof:'2026-11-18',close:34.71,pct:2.15,volume_ratio:1.41,
+ reasons:['收在日内高点','放量转强'],stop_loss:33.69,take_profit_1:36.41,max_buy_shares:100};
+DAILY={mode:'live',asof:entry.asof,stale:false,shortlist:[entry],status:'V1账户未通过',disclaimer:'旧文案'};
+renderDailyObserve();
+const card=$('daily-list').innerHTML;
+for(const value of ['中国船舶','600150','34.71','+2.15%','收在日内高点','加入自选','不再推荐']){
+ if(!card.includes(value))throw Error('missing research card detail: '+value);
+}
+for(const value of ['止损','止盈','33.69','36.41','理论最多']){
+ if(card.includes(value))throw Error('research card exposed an execution field: '+value);
+}
+if(!$('daily-warning').hidden)throw Error('obsolete gate status remains visible');
+DAILY.stale=true;
+renderDailyObserve();
+if($('daily-warning').hidden||!$('daily-warning').textContent.includes('历史名单'))throw Error('historical data not labeled');
+''')
+
     def test_budget_resume_is_explicit_and_only_shown_for_latched_accounts(self):
         self.run_js(r'''
 const fields={};for(const key of STRATEGY_FIELDS)fields[key]={value:''};

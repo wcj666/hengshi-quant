@@ -7,7 +7,7 @@ import json
 import unittest
 import pandas as pd
 import phase2
-from daily_observe import select_five
+from daily_observe import select_five, select_research
 
 
 def history():
@@ -56,10 +56,31 @@ class Phase2V1Tests(unittest.TestCase):
         with patch.object(phase2,'v1_benchmark_history',return_value=(bench,None)) as benchmark,patch.object(phase2,'stock_history',return_value=hist):
             result,errors=phase2.verify_candidates(candidates(),'live',2,0,cfg())
             self.assertEqual(benchmark.call_count,1);self.assertEqual(len(result),2)
-        with patch.object(phase2,'v1_benchmark_history',return_value=(pd.DataFrame(),'沪深300来源失败')):
+        with patch.object(phase2,'v1_benchmark_history',return_value=(pd.DataFrame(),'沪深300来源失败')), \
+                patch.object(phase2,'stock_history',return_value=hist):
             result,errors=phase2.verify_candidates(candidates(),'live',2,0,cfg())
-            self.assertTrue(result.empty);self.assertIn('来源失败',errors[0])
+        self.assertIn('来源失败',errors[0])
+        self.assertFalse(result['V1形态通过'].any())
+        self.assertEqual(len(select_research(result.to_dict('records'),cfg(),expected_day='2026-11-09')),2)
         self.assertEqual(select_five(pd.DataFrame(),cfg(),'demo')['count'],0)
+
+    def test_observation_ranked_without_market_gate_and_rejects_stale_or_limit_up(self):
+        hist,bench=history()
+        bench['close']=bench['close'].iloc[::-1].to_numpy()
+        for field in ('open','high','low'):
+            bench[field]=bench[field].iloc[::-1].to_numpy()
+        with patch.object(phase2,'stock_history',return_value=hist):
+            verified,_=phase2.verify_candidates(candidates(),'live',2,0,cfg(),benchmark_hist=bench)
+        self.assertFalse(verified['V1形态通过'].any())
+        records=verified.to_dict('records')
+        rows=select_research(records,cfg(),expected_day='2026-11-09')
+        self.assertEqual([row['code'] for row in rows],['600001','600002'])
+        self.assertTrue(all(row['research_only'] and not row['can_buy_now'] and 'entry_price' not in row for row in rows))
+        contaminated=[{**records[0],'日期':'2026-11-08'}, {**records[0],'涨跌幅%':10}, records[1]]
+        self.assertEqual([row['code'] for row in select_research(contaminated,cfg(),expected_day='2026-11-09')],['600002'])
+        self.assertEqual(select_research(records,cfg(),expected_day='2026-11-10'),[])
+        config={**cfg(),'daily_excludes':['600001']}
+        self.assertEqual([row['code'] for row in select_research(records,config,expected_day='2026-11-09')],['600002'])
 
     def test_old_daily_bars_are_not_published_as_this_sessions_verification(self):
         hist,bench=history()

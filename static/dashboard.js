@@ -207,34 +207,40 @@ function renderRanking(){if(!STORE)return;let rows=ranking==='verified'?STORE.to
  }}
 function renderDailyObserve(){
  const d=DAILY;if(!d)return;
- const rows=d.shortlist||[];
+ const rows=(d.shortlist||[]).slice(0,5);
+ const demo=d.mode==='demo';
  $('nav-count-daily').textContent=rows.length;
- $('daily-pill').textContent=d.mode==='demo'?'演示数据':d.stale?'历史名单 · 不可当日使用':`${d.asof||'未知'} · ${rows.length}/5`;
- $('daily-pill').className='pill '+(d.mode==='demo'||d.stale?'muted':'');
- $('daily-warning').textContent=(d.status||'')+'；'+(d.disclaimer||'')+'。仅研究观察，不代表当天可以买入。';
- $('daily-warning').className='signal-note '+(d.stale||d.mode==='demo'?'blocked':'');
- $('daily-excludes').textContent='已排除：'+((d.excluded||[]).join('、')||'无')+'；恢复后需下一次盘后扫描才能重新参与完整排名。';
- $('daily-list').innerHTML=rows.length?rows.map(x=>{
-  const stats=`<div class="daily-stats"><span>日线涨跌 ${pct(x.pct)}</span><span>量比 ${val(x.volume_ratio)}</span><span>基础分 ${val(x.baseline_score)}</span><span>缠论修正 ${val(x.chan_score)}</span></div>`;
-  const prices=`<div class="daily-levels"><div class="stop"><small>止损参考</small><strong>${priceText(x.stop_loss)}</strong></div><div class="tp"><small>第一止盈</small><strong>${priceText(x.take_profit_1)}</strong></div><div class="tp2"><small>第二止盈</small><strong>${priceText(x.take_profit_2)}</strong></div></div>`;
-  let risk='无有效实时账户风险核算：仅观察，不据此新增仓位';
-  if(!d.stale&&d.mode==='live'&&x.max_buy_shares!==null&&x.max_buy_shares!==undefined){
-    risk=x.max_buy_shares>0?`理论最多 ${x.max_buy_shares} 股（非交易建议）；${x.risk_note||''}`:
-      '账户现金/风险预算不足，暂不新增。'+(x.risk_note||'');
-  }
-  const actions=`<div class="daily-actions"><button class="btn small ghost" data-action="analyze" data-code="${escapeHtml(x.code)}">查看缠论</button> `+
-   (x.in_watchlist?'<span class="pill muted">已在手动自选</span>':d.mode==='demo'?'':'<button class="btn small primary" data-action="promote-daily" data-code="'+escapeHtml(x.code)+'">加入手动自选</button>')+
-   (d.mode==='demo'?'':' <button class="btn small ghost" data-action="exclude-daily" data-code="'+escapeHtml(x.code)+'">不再推荐</button>')+'</div>';
-  return `<article class="daily-card"><div class="daily-header"><div><strong>${escapeHtml(x.name)}</strong><small>${escapeHtml(x.code)} · ${escapeHtml(x.asof||'')} 日线</small></div><span class="daily-rank">#${x.rank} · ${val(x.total_score)}分</span></div>`+
-  `<div class="daily-price">${signedPriceText(x.close,x.pct,3)} <small class="${signedClass(x.pct)}">${x.pct>0?'+':''}${pct(x.pct)}</small></div>${stats}${prices}`+
-  `<div class="daily-condition">${escapeHtml(x.chan_condition||'结构待定')}</div>`+
-  `<p class="daily-reason">${(x.reasons||[]).map(escapeHtml).join(' · ')}</p>`+
-  `<div class="daily-risk">${escapeHtml(risk)}</div>${actions}</article>`;
- }).join(''):'<div class="panel"><p class="tip">没有满足过滤条件的完整日线候选，或尚未执行盘后扫描。不会为凑够5只而编造股票。</p></div>';
+ $('daily-pill').textContent=demo?'演示数据':d.stale?'等待最新日线':`${d.asof||'最新收盘'} · ${rows.length} 只`;
+ $('daily-pill').className='pill '+(demo||d.stale?'muted':'');
+ const warning=$('daily-warning');
+ let status='';
+ if(demo&&rows.length)status='当前显示演示名单。';
+ else if(d.stale&&rows.length)status='以下为历史名单。最近交易日的收盘数据待核验。';
+ else if(!rows.length)status=d.status||(d.stale?'等待最近交易日的完整收盘数据。':'本次筛选暂无符合条件的研究候选。');
+ warning.textContent=status;
+ warning.hidden=!warning.textContent;
+ $('daily-excludes').textContent=d.excluded?.length?`已排除 ${d.excluded.join('、')}`:'';
+ $('daily-list').innerHTML=rows.map((x,index)=>{
+  const code=escapeHtml(x.code);
+  const volume=x.volume_ratio==null?'':`<div class="daily-stats">成交量为前五日均量的 ${format(x.volume_ratio,2)} 倍</div>`;
+  const reasons=(x.reasons||[]).map(escapeHtml).join(' · ');
+  const add=x.in_watchlist?'<span class="pill muted">已在自选</span>':
+    `<button class="btn small primary" data-action="promote-daily" data-code="${code}">加入自选</button>`;
+  return `<article class="daily-card"><div class="daily-header"><div><strong>${escapeHtml(x.name)}</strong>
+   <small>${code}${x.asof?` · ${escapeHtml(x.asof)}`:''}</small></div><span class="daily-rank">#${index+1}</span></div>
+   <div class="daily-price"><small class="daily-close-label">收盘</small> ${signedPriceText(x.close,x.pct,2)} <small>${signedPctText(x.pct)}</small></div>${volume}
+   ${reasons?`<p class="daily-reason">${reasons}</p>`:''}
+   <div class="daily-actions"><button class="btn small ghost" data-action="analyze" data-code="${code}">查看分析</button>
+   ${demo?'':`${add}<button class="btn small ghost" data-action="exclude-daily" data-code="${code}">不再推荐</button>`}</div></article>`;
+ }).join('');
 }
 async function refreshDailyObserve(){
  try{DAILY=await api('/api/daily-observe');renderDailyObserve();}
- catch(e){$('daily-warning').textContent='读取每日观察区失败：'+e.message;}
+ catch{
+  if(DAILY){DAILY={...DAILY,stale:true};renderDailyObserve();}
+  $('daily-warning').hidden=false;
+  $('daily-warning').textContent='名单更新失败，请稍后重试。';
+ }
 }
 function chanVisualization(c){
  const bars=c.chart_bars||[],stroke=c.strokes||[];

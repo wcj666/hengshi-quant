@@ -11,7 +11,7 @@ from app import ROOT, OUT, load_config, code_str, stock_history, score_stock, sn
 from portfolio_quotes import tencent_full_snapshot
 from trade_levels import make_levels
 from chan_analysis import analyze_chan
-from daily_observe import select_five
+from daily_observe import select_five, select_research
 from strategy_v1 import enabled as strategy_enabled
 from strategy_runtime import CST, calendar_dates, latest_completed_day, write
 
@@ -125,9 +125,10 @@ def _verify_v1_candidates(candidates,mode,max_calls,pause,cfg,benchmark_hist=Non
     if benchmark_hist is None:
         benchmark_hist,problem=v1_benchmark_history(mode)
         if problem:errors.append(problem)
-    if mode!='live' or benchmark_hist is None or benchmark_hist.empty:
-        if not errors:errors.append('V1缺少完整沪深300日线，不生成候选')
+    if mode!='live':
         return pd.DataFrame(),errors
+    if benchmark_hist is None or benchmark_hist.empty:
+        if not errors:errors.append('沪深300日线待核，暂停生成V1形态候选')
     begin=(pd.Timestamp.today()-pd.Timedelta(days=3*365+60)).strftime('%Y%m%d')
     for _,snapshot in candidates.head(max_calls).iterrows():
         code=code_str(snapshot['code'])
@@ -141,11 +142,21 @@ def _verify_v1_candidates(candidates,mode,max_calls,pause,cfg,benchmark_hist=Non
                 raise ValueError(f'日线仅到{latest.date}，本次应复核{expected_day}')
             setup=build_setup(hist,benchmark_hist,asset_type='stock',name=str(snapshot['name']))
             levels=setup.get('levels',{})
+            research = None
+            if not setup['valid'] and len(complete) >= 60:
+                close = complete.close
+                ma20 = close.rolling(20).mean()
+                volume = float(latest.volume / complete.volume.iloc[-6:-1].mean())
+                research = {'amount20':float(complete.amount.tail(20).mean()),
+                            'signal_volume_ratio5':volume,
+                            'research_uptrend':bool(ma20.iloc[-1] > close.tail(60).mean() and ma20.iloc[-1] > ma20.iloc[-6]),
+                            'research_breakout':bool(latest.close > prior.high and latest.close > close.tail(5).mean() and volume >= 1.2)}
             rows.append({'日期':str(latest.date),'股票代码':code,'股票名称':str(snapshot['name']),
                          '日线来源':hist.attrs.get('source','来源未标注'),
                          '收盘':float(latest.close),'涨跌幅%':round((float(latest.close)/float(prior.close)-1)*100,2),
                          '初筛分':snapshot.get('初筛分',0),'V1形态通过':setup.get('eligible') is True,
                          'V1形态证据':json.dumps(setup,ensure_ascii=False,allow_nan=False),
+                         '研究证据':json.dumps(research,allow_nan=False) if research is not None else None,
                          'V1阻断原因':'；'.join(setup.get('blockers',[])),
                          '触发下沿':levels.get('trigger_price'),'建仓上限':levels.get('entry_price'),
                          '止损参考':levels.get('stop_loss'),'第一止盈':levels.get('take_profit_1'),
@@ -332,13 +343,17 @@ def produce_report(mode, universe, pick, verified, sectors, alerts, p_df, missin
         else:
             risk+='；当日参考盈亏不可计算（演示数据或部分证券缺少昨收价）'
     err='<ul>'+''.join('<li>'+html.escape(x)+'</li>' for x in errors[:40])+'</ul>' if errors else '无抓取异常（不代表数据无延迟）'
-    drows=pd.DataFrame(daily['shortlist'])
+    drows=pd.DataFrame(daily.get('research_shortlist',daily['shortlist']))
     if not drows.empty:
-        fields=(['rank','name','code','asof','close','trigger_price','entry_price','stop_loss','take_profit_1','take_profit_2'] if v1 else ['rank','name','code','asof','close','total_score','chan_condition','stop_loss','take_profit_1','take_profit_2'])
+        fields=(['rank','name','code','asof','close','pct','volume_ratio','reasons'] if v1 else ['rank','name','code','asof','close','total_score','chan_condition','stop_loss','take_profit_1','take_profit_2'])
+        if v1:
+            drows['reasons']=drows['reasons'].map('；'.join)
         drows=drows[fields].rename(columns={'rank':'序号','name':'名称','code':'代码','asof':'日线日期','close':'参考收盘价','trigger_price':'固定触发下沿','entry_price':'最高成交价Ecap','total_score':'研究排序分','chan_condition':'简化缠论观察','stop_loss':'止损参考','take_profit_1':'止盈①','take_profit_2':'止盈②'})
+        drows=drows.rename(columns={'pct':'涨跌幅%','volume_ratio':'对前5日均量','reasons':'入选理由'})
     doc=f'''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>A股量化助手 v3</title><style>body{{font-family:-apple-system,system-ui,sans-serif;margin:30px auto;max-width:1250px;padding:0 16px;background:#f6f8fc;color:#253149}}.card{{padding:18px;border-radius:14px;background:white;margin:18px 0;box-shadow:0 2px 14px #e2e5ee}}.scroll{{overflow-x:auto}}.t{{width:100%;border-collapse:collapse;font-size:12px;white-space:nowrap}}td,th{{border-bottom:1px solid #e7e9f0;padding:9px;text-align:left}}th{{background:#eaf0fb}}.warn{{color:#a44e20}}</style><h1>A股 A+B 量化助手 · 网页研究台 v3</h1><div class="card"><strong class="warn">{html.escape(status)}</strong><p>生成：{html.escape(when)}；全市场快照：{len(universe)}只；初筛：{len(pick)}只；日线复核：{len(verified)}只（上限{max_candidates}）</p><p>{html.escape(risk)}</p><small>来源：{html.escape(source_info)}。风险警报不保证止损成功。无券商连接、无自动下单。</small></div><div class="card"><h2>一、组合、止损止盈参考价与提醒</h2>{table(alerts,50)}<h3>持仓详情</h3><div class="scroll">{table(p_df,100)}</div></div><div class="card"><h2>二、每日精选观察（最多5只，不是保证最佳买入）</h2><p>日线日期：{html.escape(str(daily["asof"]))}；不满足筛选条件则不凑数。缠论只做简化结构辅助，未经完整一二三买验证。若为演示数据，严禁据此交易。</p><div class="scroll">{table(drows,5)}</div></div><div class="card"><h2>三、日线复核强势榜</h2><div class="scroll">{table(verified,30)}</div></div><div class="card"><h2>四、全市场快照初筛榜</h2><div class="scroll">{table(pick,30)}</div></div><div class="card"><h2>五、行业强度榜（单日）</h2><div class="scroll">{table(sectors,30)}</div></div><div class="card"><h2>数据错误与限制</h2>{err}<p>强度排名依据当日涨幅和上涨家数占比；不等于资金净流入或多日趋势。股票历史日线可能滞后于盘中快照。历史价格前复权、快照价格未复权，不可跨时间直接比价。浮动盈亏按录入成本、当日盈亏按上一交易日参考价计算，不含交易费用、分红、当日交易与券商成本调整，因此可能与券商数值不一致。ETF/转债行情可能不同步。实际交易后必须更新 config.json 的持仓和现金。周末或节假日执行可能返回旧收盘价。</p></div></html>'''
     if v1:
-        doc=doc.replace('缠论只做简化结构辅助，未经完整一二三买验证。','V1只使用固定3日缩量回调后转强形态；候选价不是已保存计划，须服务器prepare和人工审核。')
+        doc=doc.replace('缠论只做简化结构辅助，未经完整一二三买验证。','按趋势、量价与流动性排序，V1入场另行核验。')
+        doc=doc.replace(str(daily['asof'])+'；不满足筛选条件',str(daily.get('research_asof',daily['asof']))+'；不满足筛选条件')
         doc=doc.replace('三、日线复核强势榜','三、V1完整日线形态复核')
         if daily.get('blockers'):
             doc=doc.replace('<h2>数据错误与限制</h2>','<h2>数据错误与限制</h2><p>'+html.escape('；'.join(daily['blockers']))+'</p>')
@@ -374,6 +389,8 @@ def run_scan(args, cfg):
     alerts,p_df,missing,equity,loss,remain=alert_rules(cfg,prices,universe,verified,args.mode)
     daily=select_five(verified if expected_day or args.mode=='demo' else pd.DataFrame(),cfg,args.mode)
     if strategy_enabled(cfg):
+        daily['research_shortlist']=select_research(verified.to_dict('records'),cfg,expected_day=expected_day)
+        daily['research_asof']=expected_day if daily['research_shortlist'] else None
         daily['source_errors']=errors
         if not daily['count']:
             daily['blockers']=list(dict.fromkeys(daily.get('blockers',[])+errors))[:30]
@@ -395,11 +412,12 @@ def run_scan(args, cfg):
               'config_hash':hashlib.sha256(json.dumps(cfg,sort_keys=True,ensure_ascii=False).encode()).hexdigest(),
               'universe_count':len(universe),'verified_count':len(verified),
               'source_notes':sources,'errors_count':len(errors),
-              'quote_time_verified':False,'daily_observe_count':daily['count'],'daily_observe_asof':daily['asof']}
+              'quote_time_verified':False,'daily_observe_count':len(daily.get('research_shortlist',daily['shortlist'])),
+              'daily_observe_asof':daily.get('research_asof',daily['asof'])}
     tmp=OUT/'run_meta.json.tmp'
     tmp.write_text(json.dumps(metadata,ensure_ascii=False,indent=2),encoding='utf-8')
     tmp.replace(OUT/'run_meta.json')
-    print(f'已生成 {OUT/"report_v2.html"}；全市场 {len(universe)}；初筛 {len(pick)}；日线复核 {len(verified)}；提醒 {len(alerts)}；精选观察 {daily["count"]}；本机通知 {sent}')
+    print(f'已生成 {OUT/"report_v2.html"}；全市场 {len(universe)}；初筛 {len(pick)}；日线复核 {len(verified)}；提醒 {len(alerts)}；精选观察 {metadata["daily_observe_count"]}；本机通知 {sent}')
     if errors:print('抓取异常:',*errors[:10],sep='\n - ')
 
 
