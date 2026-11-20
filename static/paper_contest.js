@@ -83,12 +83,12 @@ function orderBlocker() {
   if (!snapshot) return '等待模拟账本加载。';
   const trading = snapshot.trading;
   if (trading?.session_open === false) return trading.session_reason || '当前时段暂停模拟交易。';
-  if (snapshot.before_start || snapshot.ended) return '当前日期不在比赛交易期间。';
+  if (snapshot.before_start || snapshot.ended) return '当前日期不在模拟交易期间。';
   if (fields.side.value === 'buy') {
     if (trading?.buy_allowed === false || snapshot.paused) {
       return trading?.buy_reason || '当前暂停新增模拟持仓。';
     }
-    if (selectedPosition()) return '已持有该证券，比赛规则暂停加仓。';
+    if (selectedPosition()) return '已持有该证券，当前规则暂停加仓。';
   } else if (trading?.sell_allowed === false) {
     return trading.sell_reason || '当前暂停模拟卖出。';
   } else if (fields.code.value.trim() && !(selectedPosition()?.sellable > 0)) {
@@ -176,7 +176,7 @@ function render(d) {
     }
   }
   const daily = d.daily || {};
-  $('period').textContent = d.start + ' — ' + d.end + ' · 北京时间';
+  $('period').textContent = d.ongoing ? '持续模拟 · 交易日开放 · 北京时间' : d.start + ' — ' + d.end + ' · 北京时间';
   $('equity').textContent = cash(d.equity);
   $('source').textContent = d.source + ' · ' + time(d.asof);
   $('daily-label').textContent = (daily.date ? daily.date.slice(5) + ' ' : '') + '当日盈亏';
@@ -186,7 +186,7 @@ function render(d) {
     (daily.return_pct > 0 ? '+' : '') + daily.return_pct.toFixed(2) + '% · 基准 ' + daily.basis_asof.slice(5,10) + ' ' + daily.basis_label;
   $('pnl').textContent = profit(d.net_pnl);
   $('pnl').className = tone(d.net_pnl);
-  $('return').textContent = '比赛收益率 ' + Number(d.return_pct).toFixed(2) + '% · 起点 ' + cash(d.initial_equity);
+  $('return').textContent = '累计收益率 ' + Number(d.return_pct).toFixed(2) + '% · 起点 ' + cash(d.initial_equity);
   $('cash').textContent = cash(d.cash);
   $('exposure').textContent = d.exposure_pct == null ? '持仓估值待核验' : '持仓仓位 ' + d.exposure_pct.toFixed(2) + '%';
   $('trade-count').textContent = d.trade_count + ' 笔';
@@ -231,7 +231,7 @@ function render(d) {
     return tr;
   }), '尚未发生虚拟成交');
   $('costs').textContent = d.fees.note;
-  $('opening').textContent = '开赛前券商总盈亏 ' + cash(d.opening_broker_total_pnl) + ' 单独保留，不计入本次比赛收益。';
+  $('opening').textContent = '期初券商总盈亏 ' + cash(d.opening_broker_total_pnl) + ' · 模拟收益从期初净值计算。';
   const feed = d.refresh || {};
   $('refresh-status').textContent = (feed.status === 'error' ? '最近取价失败：' + feed.message + '；保留上次有效估值。' : d.phase_message) +
     ' · 最近取价成功 ' + time(feed.last_success_at) + ' · 页面读取 ' + time(new Date().toISOString());

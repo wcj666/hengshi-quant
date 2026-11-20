@@ -2,13 +2,13 @@
 from datetime import datetime
 import json
 from pathlib import Path
-from paper_contest import CN, validate_state, sellable, money, _session
+from paper_contest import CN, validate_state, sellable, money, _session, continuation_active, effective_calendar, date_allowed
 from pnl_engine import valid_price
 from quote_health import parse_provider_time
 
 
 def daily_baseline(state, day):
-    previous = max((date for date in state['calendar'] if date < day), default=None)
+    previous = max((date for date in effective_calendar(state) if date < day), default=None)
     if not previous:
         return None
     for record in reversed(state['observations']):
@@ -93,7 +93,8 @@ def load_snapshot(store,now=None):
                      'stop_loss':state['plans'].get(code,{}).get('stop_loss')})
     asof=state['last_valuation_asof'];stamp=datetime.fromisoformat(asof.replace('Z','+00:00')).astimezone(CN)
     age=(now-stamp).total_seconds();day=str(now.date())
-    before=day<state['start'];ended=day>state['end']
+    ongoing=continuation_active(state)
+    before=day<state['start'];ended=not ongoing and day>state['end']
     stale=stamp.date()!=now.date() or age<0 or age>90
     if state.get('last_mark_closing') and stamp.date()==now.date() and stamp.hour>=15:
         stale=False
@@ -116,7 +117,7 @@ def load_snapshot(store,now=None):
     if not complete:stale=True;label='等待完整持仓估值'
     exposure=money(sum(r['value'] for r in rows)) if complete else None
     valuation_day = stamp.date().isoformat()
-    in_contest = state['start'] <= valuation_day <= state['end'] and valuation_day in state['calendar']
+    in_contest = date_allowed(state, valuation_day)
     usable = bool(complete and in_contest and age >= 0 and (not stale or phase == 'idle'))
     baseline = daily_baseline(state, valuation_day) if usable else None
     daily = {'date': valuation_day if in_contest else None, 'pnl': None, 'return_pct': None,
@@ -134,7 +135,8 @@ def load_snapshot(store,now=None):
         row['previous_close'] = previous_close
         row['daily_pnl'] = (daily_position_pnl(row, previous_close, trade_totals)
                             if usable and row['value'] is not None else None)
-    return {'mode':'paper_only','start':state['start'],'end':state['end'],'label':label,
+    return {'mode':'paper_only','start':state['start'],'end':None if ongoing else state['end'],
+            'ongoing':ongoing,'label':label,
             'before_start':before,'ended':ended,'stale':stale,'asof':asof,
             'source':'开赛券商截图' if asof==opening['asof'] else '腾讯公开行情 · 提供方时间',
             'initial_equity':state['initial_equity'],'equity':state['last_equity'],'cash':state['cash'],

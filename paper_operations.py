@@ -37,6 +37,8 @@ def _read(store):
         if not isinstance(state, dict):
             raise ValueError('模拟账本格式无效')
         engine.validate_state(state)
+        engine.refresh_continuation_calendar(state, store, engine.clock_now())
+        engine.validate_state(state)
         return state
     except (ValueError, KeyError, TypeError, OverflowError) as error:
         raise PaperTradeConflict('模拟账本校验未通过') from error
@@ -56,6 +58,7 @@ def _revision(state):
     # Quote observations replace state.json every 30 seconds. They don't change
     # the holdings, cash or trade sequence reviewed by the user.
     fields = {key: state[key] for key in ('fixed_rules_hash', 'cash', 'positions', 'plans', 'trades')}
+    fields['continuation_hash'] = state.get('continuation_hash')
     encoded = json.dumps(fields, sort_keys=True, ensure_ascii=False, allow_nan=False).encode()
     return sha256(encoded).hexdigest()
 

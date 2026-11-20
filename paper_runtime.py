@@ -10,16 +10,16 @@ import json
 from pathlib import Path
 import threading
 
-from paper_contest import clock_now, validate_state, observe, fetch_quotes, _write, report
+from paper_contest import (clock_now, validate_state, observe, fetch_quotes, _write, report,
+                          date_allowed, refresh_continuation_calendar)
 
 INTERVAL = 30
 
 
 def refresh_phase(state, now):
     day = str(now.date())
-    if (now.weekday() >= 5 or day not in state['calendar'] or
-            not state['start'] <= day <= state['end']):
-        return 'idle', '非比赛交易日，休市'
+    if now.weekday() >= 5 or not date_allowed(state, day):
+        return 'idle', '非已核验模拟交易日，休市'
     moment = now.time()
     if time(9, 30) <= moment < time(11, 30) or time(13) <= moment < time(15):
         return 'intraday', '交易时段每30秒获取腾讯行情'
@@ -61,6 +61,10 @@ def refresh_store(store, *, now=None, force=False, fetcher=None):
         try:
             state = json.loads((store / 'state.json').read_text())
             validate_state(state)
+            calendar_changed = refresh_continuation_calendar(state, store, started)
+            if calendar_changed:
+                validate_state(state)
+                _write(store / 'state.json', state)
             phase, message = refresh_phase(state, started)
             status.update(phase=phase, message=message)
             if phase == 'idle':

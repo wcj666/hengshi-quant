@@ -139,9 +139,99 @@ def fixed_rules_hash(state):
     return hashlib.sha256(json.dumps(fields,sort_keys=True,ensure_ascii=False,allow_nan=False).encode()).hexdigest()
 
 
+def continuation_active(state):
+    return isinstance(state.get('continuation'), dict) and state['continuation'].get('enabled') is True
+
+
+def _continuation_hash(continuation):
+    return hashlib.sha256(json.dumps(continuation,sort_keys=True,ensure_ascii=False,allow_nan=False).encode()).hexdigest()
+
+
+def effective_calendar(state):
+    if continuation_active(state):
+        previous = [day for day in state['calendar'] if day <= state['end']]
+        return sorted(set(previous) | set(state['continuation']['calendar']))
+    return state['calendar']
+
+
+def date_allowed(state, day):
+    if day < state['start'] or day not in effective_calendar(state):
+        return False
+    if day <= state['end']:
+        return True
+    return continuation_active(state) and day >= state['continuation']['activated_at'][:10]
+
+
+def _verified_calendar(payload, now):
+    if not isinstance(payload, dict) or payload.get('verified') is not True or not isinstance(payload.get('dates'), list):
+        raise ValueError('持续模拟须使用已核验的交易日历')
+    days = sorted({_opening_day(day).isoformat() for day in payload['dates']})
+    if not days or days[-1] < now.astimezone(CN).date().isoformat():
+        raise ValueError('交易日历尚未覆盖当前日期')
+    return days
+
+
+def continue_account(state, calendar, reason, now):
+    """Append the authorized date extension while retaining the original fixed rules."""
+    validate_state(state)
+    if now.tzinfo is None or not isinstance(reason, str) or not reason.strip():
+        raise ValueError('持续模拟须记录带时区的生效时间和授权依据')
+    if continuation_active(state):
+        return {'ongoing': True, 'already_enabled': True}
+    days = _verified_calendar(calendar, now)
+    continuation = {'version': 1, 'enabled': True, 'activated_at': now.astimezone(CN).isoformat(),
+                    'reason': reason.strip(), 'calendar': [day for day in days if day >= state['start']],
+                    'original_end': state['end'], 'original_rules_hash': state['fixed_rules_hash']}
+    state['continuation'] = continuation
+    state['continuation_hash'] = _continuation_hash(continuation)
+    event = {'at': now.isoformat(), 'kind': 'continuous_simulation_enabled',
+             'original_end': state['end'], 'reason': reason.strip(),
+             'continuation_hash': state['continuation_hash']}
+    state['events'].append(event)
+    return {'ongoing': True, 'effective_at': continuation['activated_at'],
+            'calendar_through': days[-1]}
+
+
+def refresh_continuation_calendar(state, store, now):
+    """Use the locally verified exchange calendar, without changing the real account."""
+    if not continuation_active(state):
+        return False
+    calendar_path = Path(store).parent/'strategy_calendar.json'
+    try:
+        days = _verified_calendar(json.loads(calendar_path.read_text(encoding='utf-8')), now)
+    except (OSError, ValueError, TypeError):
+        return False
+    prior = state['continuation']['calendar']
+    today = now.astimezone(CN).date().isoformat()
+    updated = sorted({day for day in prior if day < today}
+                     | {day for day in days if day >= state['start']})
+    if updated == prior:
+        return False
+    previous_hash = state['continuation_hash']
+    state['continuation']['calendar'] = updated
+    state['continuation_hash'] = _continuation_hash(state['continuation'])
+    state['events'].append({'at': now.isoformat(), 'kind': 'simulation_calendar_updated',
+                            'previous_hash': previous_hash, 'continuation_hash': state['continuation_hash'],
+                            'calendar_through': updated[-1]})
+    return True
+
+
 def validate_state(state):
     if state.get('mode')!='paper_only' or state.get('fixed_rules_hash')!=fixed_rules_hash(state):
         raise ValueError('初始账户、日期或固定规则发生变化，禁止隐式重置比赛')
+    if 'continuation' in state:
+        continuation = state['continuation']
+        from quote_health import parse_provider_time
+        if (not continuation_active(state) or continuation.get('version') != 1
+                or continuation.get('original_rules_hash') != state['fixed_rules_hash']
+                or continuation.get('original_end') != state['end']
+                or not parse_provider_time(continuation.get('activated_at'))
+                or not continuation.get('reason')
+                or continuation.get('calendar') != sorted(set(continuation.get('calendar', [])))
+                or state.get('continuation_hash') != _continuation_hash(continuation)):
+            raise ValueError('持续模拟的授权或交易日历记录无效')
+        for day in continuation['calendar']:
+            _opening_day(day)
     cash=state['opening_snapshot']['available_cash']
     qty={p['code']:p['quantity'] for p in state['opening_snapshot']['positions']}
     for i,t in enumerate(state['trades'],1):
@@ -207,7 +297,8 @@ def sellable(position,now):
 
 def _session(state,now,side):
     day=str(now.date())
-    if now.weekday()>=5 or not state['start']<=day<=state['end'] or day not in state['calendar']:raise ValueError('不在比赛工作日交易日期内，禁止成交')
+    if now.weekday()>=5 or not date_allowed(state,day):
+        raise ValueError('当前日期不在已核验交易日历内，或尚未开放模拟操作')
     if not (time(9,45)<=now.time()<time(11,30) or time(13)<=now.time()<time(14,57)):
         raise ValueError('模拟成交时段为 9:45–11:30、13:00–14:57（北京时间）')
     if side=='buy' and now.time()>=time(14,45):raise ValueError('14:45后不新增')
@@ -278,7 +369,7 @@ def execute(state,code,side,quantity,quotes,now,reason):
         risk=compute(cfg,prices,fresh=True,watch_quotes=[{'code':code,'name':item['name'],'price':q['price']}],strategy_account=context)
         snap={'mode':'live','market_session':True,'calendar_ok':True,'config_hash':hashlib.sha256(json.dumps(cfg,sort_keys=True,ensure_ascii=False).encode()).hexdigest(),
               'fetch_finished_at':now.astimezone(timezone.utc).isoformat(),'risk':risk,'strategy_account':context,
-              'trading_dates':state['calendar'],'quote_health':{'provider_timestamps_verified':True,'block_trade_signals':False}}
+              'trading_dates':effective_calendar(state),'quote_health':{'provider_timestamps_verified':True,'block_trade_signals':False}}
         check=evaluate_entry(cfg,code,q,snap,setup=plan.get('setup'),now=now)
         if not check.get('allowed'):raise ValueError('新增未通过：'+'；'.join(check.get('blockers',[])))
         if qty>int(check.get('max_buy_shares') or 0):raise ValueError('超过V1最大股数')
@@ -379,7 +470,7 @@ def prepare(state,code,sector,review,now):
     history=history_by_asset(code,item['type'],begin)
     position=state['positions'].get(code)
     if position:
-        result=build_exit_suggestion(history,position,trading_dates=state['calendar'],now=now,existing_plan=state['plans'].get(code))
+        result=build_exit_suggestion(history,position,trading_dates=effective_calendar(state),now=now,existing_plan=state['plans'].get(code))
         if not result.get('adoptable'):raise ValueError(result.get('reason') or '旧仓退出条件待核验')
         plan={**result['plan'],'sector':sector,'review_sources':review['sources']}
         state['plans'][code]=plan;return plan
@@ -387,7 +478,7 @@ def prepare(state,code,sector,review,now):
     if any(review.get(k) is not True for k in required):raise ValueError('财务/基金、公告、除权与压力空间不得自动勾选')
     setup=build_setup(history,benchmark_history(begin),item['type'],item['name'],now=now)
     if not setup.get('eligible'):raise ValueError('；'.join(setup.get('blockers',[])))
-    following=[d for d in state['calendar'] if d>setup['signal_date']]
+    following=[d for d in effective_calendar(state) if d>setup['signal_date']]
     if not following:raise ValueError('下一交易日未核验')
     plan={**setup['levels'],'strategy_version':'1.0','setup_verified':True,'legacy_exit_only':False,
           'signal_date':setup['signal_date'],'valid_on':following[0],'sector':sector,'setup':setup,
@@ -398,13 +489,18 @@ def prepare(state,code,sector,review,now):
 
 def report(state):
     net=money(state['last_equity']-state['initial_equity'])
-    lines=['# 模拟比赛账本','',f"比赛：{state['start']} 至 {state['end']}；模式：虚拟，不连接券商。",
+    period = f"持续模拟：{state['start']} 起，按已核验交易日开放。" if continuation_active(state) else f"比赛：{state['start']} 至 {state['end']}。"
+    lines=['# 模拟账户账本','',period,
            f"初始净值：{state['initial_equity']:,.2f}；最近估值：{state['last_equity']:,.2f}；比赛净盈亏：{net:+,.2f}。",
            f"估值源时间：{state['last_valuation_asof']}；开赛前历史总盈亏另存，不计入比赛。",
            f"现金：{state['cash']:,.2f}；虚拟成交：{len(state['trades'])}笔；最大观察回撤：{state['maximum_drawdown']:,.2f}。",
            '', '|证券|代码|数量|开赛/虚拟成本|当前可卖上限|','|---|---|---:|---:|---:|']
     for c,p in state['positions'].items():lines.append(f"|{p['name']}|{c}|{p['quantity']}|{p['cost']:.3f}|{sellable(p,clock_now())}|")
     lines+=['','## 成本模型',state['fees']['note'],'','## 固定约定',*['- '+s for s in state['notes']]]
+    if continuation_active(state):
+        lines+=['','## 持续运行',
+                f"自 {state['continuation']['activated_at']} 取消结束日期。后续按已核验交易日及模拟成交时段操作。",
+                f"授权依据：{state['continuation']['reason']}"]
     lines+=['','## 最近虚拟成交']
     for t in state['trades'][-20:]:lines.append(f"- {t['at']} {t['side']} {t['code']} × {t['quantity']} @ {t['price']}，费用{t['fee']['total']:.2f}，额外滑点估算{t['slippage_estimate']:.2f}；{t['reason']}")
     if not state['trades']:lines.append(f"尚无虚拟成交。首个可操作日为 {state['start']}。")
@@ -427,6 +523,7 @@ def main():
     p=sub.add_parser('init');p.add_argument('--snapshot',type=Path,required=True);p.add_argument('--calendar',type=Path,required=True)
     p.add_argument('--start',default='2026-11-13');p.add_argument('--end',default='2026-11-19')
     sub.add_parser('status');p=sub.add_parser('observe');p.add_argument('--closing',action='store_true')
+    p=sub.add_parser('continue');p.add_argument('--calendar',type=Path,required=True);p.add_argument('--reason',required=True)
     p=sub.add_parser('prepare');p.add_argument('code');p.add_argument('--sector',required=True);p.add_argument('--review',type=Path,required=True)
     p=sub.add_parser('trade');p.add_argument('side',choices=['buy','sell']);p.add_argument('code');p.add_argument('quantity',type=int);p.add_argument('--reason',required=True)
     p=sub.add_parser('real-update');p.add_argument('--equity',type=float,required=True);p.add_argument('--net-external-flow',type=float,required=True);p.add_argument('--asof',required=True)
@@ -442,7 +539,10 @@ def main():
             output={'initialized':True,'initial_equity':state['initial_equity'],'holdings':len(state['positions']),'first_allowed_trade':state['start']}
         else:
             state=json.loads(path.read_text());validate_state(state);working=deepcopy(state)
+            refresh_continuation_calendar(working,store,now)
             if args.action=='status':output={'initial_equity':state['initial_equity'],'last_equity':state['last_equity'],'cash':state['cash'],'positions':state['positions'],'trades':state['trades'],'notes':state['notes']}
+            elif args.action=='continue':
+                output=continue_account(working,json.loads(args.calendar.read_text()),args.reason,now)
             elif args.action=='confirm-availability':
                 position=working['positions'].get(args.code)
                 if not position or not position.get('opening_inventory') or not 0<=args.quantity<=position['quantity'] or not args.evidence.strip():raise ValueError('只能按用户明确确认更新剩余期初库存可卖数，并记录依据')
@@ -451,7 +551,7 @@ def main():
                 position['opening_available']=args.quantity;working['events'].append(event);output=event
             elif args.action=='real-update':
                 moment=datetime.fromisoformat(args.asof)
-                if not moment.tzinfo or not state['start']<=str(moment.astimezone(CN).date())<=state['end'] or moment>now:raise ValueError('实盘对账时间无效')
+                if not moment.tzinfo or not date_allowed(working,str(moment.astimezone(CN).date())) or moment>now:raise ValueError('实盘对账时间无效')
                 working['real_updates'].append({'asof':args.asof,'equity':number(args.equity,.01),'net_external_flow':number(args.net_external_flow),'recorded_at':now.isoformat()});output=working['real_updates'][-1]
             elif args.action=='prepare':output=prepare(working,args.code,args.sector,json.loads(args.review.read_text()),now)
             else:

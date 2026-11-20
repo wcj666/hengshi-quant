@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 from datetime import datetime, timedelta
 import time
-from paper_contest import initialize,observe,execute,money,CN
+from paper_contest import initialize,observe,execute,money,CN,continue_account
 from paper_view import load_snapshot
 from web_dashboard import CSRF, create_app
 
@@ -101,6 +101,24 @@ class PaperViewTests(unittest.TestCase):
         d=load_snapshot(self.store,now+timedelta(seconds=2))
         self.assertTrue(d['stale'])
         self.assertIsNone(d['daily']['pnl'])
+
+    def test_continuous_account_uses_extended_calendar_and_preserves_opening_results(self):
+        prior=datetime(2026,11,19,15,5,tzinfo=CN)
+        observe(self.state,{'600406':{'price':9.9,'source_timestamp':prior.isoformat()}},prior,closing=True)
+        now=datetime(2026,11,20,10,tzinfo=CN)
+        continue_account(self.state,{'verified':True,'dates':['2026-11-19','2026-11-20','2026-11-23']},
+                         '用户授权持续模拟',now)
+        observe(self.state,{'600406':{'price':10.0,'previous_close':9.9,'source_timestamp':now.isoformat()}},now)
+        self.file.write_text(json.dumps(self.state))
+        view=load_snapshot(self.store,now)
+        self.assertTrue(view['ongoing'])
+        self.assertFalse(view['ended'])
+        self.assertIsNone(view['end'])
+        self.assertTrue(view['trading']['session_open'])
+        self.assertEqual(view['daily']['pnl'],20.)
+        self.assertEqual(view['daily']['basis_asof'],prior.isoformat())
+        self.assertEqual(view['initial_equity'],100000.)
+        self.assertFalse(load_snapshot(self.store,now.replace(day=21))['trading']['session_open'])
 
     def test_foreign_host_is_rejected(self):
         self.assertEqual(self.client.get('/api/paper-contest',headers={'Host':'foreign.example'}).status_code,403)

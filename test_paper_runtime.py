@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock, patch
 
-from paper_contest import CN, execute
+from paper_contest import CN, execute, continue_account
 from paper_runtime import refresh_store, read_status
 from paper_view import load_snapshot
 from test_paper_contest import account, quote
@@ -29,6 +29,28 @@ class PaperRuntimeTests(unittest.TestCase):
 
     def fetcher(self, now=None):
         return Mock(return_value=({'600406':quote(now or self.now,9.8,9.79,9.8)},[]))
+
+    def test_continued_account_refreshes_and_accepts_new_verified_calendar(self):
+        now=self.now.replace(day=20)
+        continue_account(self.state,{'verified':True,'dates':self.state['calendar']},'用户确认',now)
+        self.path.write_text(json.dumps(self.state))
+        before=self.cfg.read_bytes()
+        result=refresh_store(self.store,now=now,fetcher=self.fetcher(now))
+        self.assertEqual(result['status'],'ok')
+        later=now.replace(day=23)
+        (self.root/'output'/'strategy_calendar.json').write_text(json.dumps({
+            'verified':True,'dates':self.state['calendar']+['2026-11-23']}))
+        result=refresh_store(self.store,now=later,fetcher=self.fetcher(later))
+        self.assertEqual(result['status'],'ok')
+        state=json.loads(self.path.read_text())
+        self.assertEqual(state['fixed_rules_hash'],self.state['fixed_rules_hash'])
+        self.assertIn('2026-11-23',state['continuation']['calendar'])
+        self.assertEqual(state['trades'],[])
+        self.assertEqual(self.cfg.read_bytes(),before)
+        weekend=now.replace(day=21)
+        feed=self.fetcher(weekend)
+        self.assertEqual(refresh_store(self.store,now=weekend,fetcher=feed)['status'],'idle')
+        feed.assert_not_called()
 
     def test_poll_updates_prices_and_nav_without_orders_or_real_config(self):
         before=self.cfg.read_bytes()

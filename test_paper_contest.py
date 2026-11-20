@@ -2,7 +2,8 @@
 from copy import deepcopy
 from datetime import datetime
 import unittest
-from paper_contest import initialize,execute,observe,fees,sellable,validate_state,preview_trade,CN,fixed_rules_hash
+from paper_contest import (initialize,execute,observe,fees,sellable,validate_state,preview_trade,CN,fixed_rules_hash,
+                           continue_account,effective_calendar)
 from strategy_defaults import initial_v1_rules
 from v1_backtest import DEFAULT_COSTS
 
@@ -32,6 +33,39 @@ def plan(state):
 
 
 class PaperContestTests(unittest.TestCase):
+    def test_continued_account_can_sell_after_original_end_and_keeps_opening(self):
+        holding={'code':'600406','name':'测试证券','type':'stock','quantity':200,'available_quantity':100,
+                 'cost':15.,'screenshot_price':10.,'market_value':2000.}
+        state=account([holding]); original=deepcopy(state)
+        state['paused']=True
+        now=datetime(2026,11,20,10,tzinfo=CN)
+        continue_account(state,{'verified':True,'dates':DAYS+['2026-11-23']},'用户确认持续模拟',now)
+        self.assertEqual(state['fixed_rules_hash'],original['fixed_rules_hash'])
+        self.assertEqual(state['opening_snapshot'],original['opening_snapshot'])
+        self.assertEqual(state['cash'],original['cash'])
+        self.assertTrue(state['paused'])
+        fill=execute(state,'600406','sell',100,{'600406':quote(now)},now,'持续模拟减仓')
+        self.assertEqual(fill['quantity'],100)
+        self.assertEqual(state['positions']['600406']['quantity'],100)
+        self.assertIn('2026-11-23',effective_calendar(state))
+        validate_state(state)
+
+    def test_continuation_rejects_unverified_dates_and_cannot_relax_other_rules(self):
+        state=account();now=datetime(2026,11,20,10,tzinfo=CN)
+        for payload in ({'dates':DAYS}, {'verified':True,'dates':DAYS[:-1]},
+                        {'verified':True,'dates':DAYS+['2026-11-21']}):
+            with self.assertRaises(ValueError):
+                continue_account(state,payload,'用户确认',now)
+            self.assertNotIn('continuation',state)
+        continue_account(state,{'verified':True,'dates':DAYS+['2026-11-23']},'用户确认',now)
+        for day in (21,24):
+            moment=now.replace(day=day)
+            with self.assertRaises(ValueError):
+                execute(state,'600406','buy',100,{'600406':quote(moment)},moment,'未核验日期')
+        changed=deepcopy(state);changed['continuation']['calendar'].append('2026-11-24')
+        with self.assertRaises(ValueError):
+            validate_state(changed)
+
     def test_opening_snapshot_preserved_and_prior_loss_not_contest_loss(self):
         p={'code':'600406','name':'测试证券','type':'stock','quantity':200,'available_quantity':100,
            'cost':15.,'screenshot_price':10.,'market_value':2000.,'broker_floating_pnl':-1005.}
